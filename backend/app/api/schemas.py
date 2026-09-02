@@ -279,6 +279,7 @@ class OperationLogOut(BaseModel):
     operation: str
     resource_type: str | None
     resource_id: str | None
+    resource_display_name: str | None = None
     request_ip: str | None
     detail: dict[str, Any] | None
     created_at: datetime

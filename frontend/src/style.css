@@ -541,3 +541,8 @@ button { cursor: pointer; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.admin-sidebar { position: sticky; top: 0; align-self: flex-start; height: 100vh; overflow: hidden; }
+.admin-nav { min-height: 0; overflow-y: auto; }
+.admin-sidebar-bottom { flex-shrink: 0; }
+@media (max-width: 760px) { .admin-sidebar { position: fixed; } }

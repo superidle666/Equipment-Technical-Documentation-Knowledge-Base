@@ -1,3 +1,10 @@
+<!--
+ * @FilePath: @/pages/admin/permissions/index.vue
+ * @Author: 项目维护者
+ * @Date: 2026-09-02
+ * @Description: 权限注册表展示与启停页面。
+ * @BusinessRule: 权限编码由代码注册表维护，页面只允许调整启用状态，不能自由新增或删除。
+-->
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { CheckCircleIcon, ChevronDownIcon, ChevronRightIcon } from 'tdesign-icons-vue-next'
@@ -14,6 +21,7 @@ const savingPermissionId = ref<number>()
 const errorMessage = ref('')
 
 const parentPermissions = computed(() => permissions.value.filter((permission) => permission.parent_id === null))
+// NOTE: 子权限默认收起，避免注册表较大时影响日常查找与角色分配。
 const visiblePermissions = computed(() => {
   const childrenByParent = new Map<number, Permission[]>()
   for (const permission of permissions.value) {
@@ -53,6 +61,7 @@ function toggleExpanded(permission: Permission) {
     : [...expandedParentIds.value, permission.id]
 }
 
+/** 启用或停用注册权限；后端会写入独立的启用或停用审计操作。 */
 async function togglePermissionStatus(row: Permission) {
   if (savingPermissionId.value) return
   savingPermissionId.value = row.id

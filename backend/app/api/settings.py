@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+系统配置管理接口。
+@author: 项目维护者
+@date: 2026-09-02
+@desc: 仅允许系统管理员读取和更新已注册的系统配置。
+@business: 敏感配置只写不读，接口响应不返回密钥明文。
+"""
 """Administrator-only encrypted system-setting endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
@@ -11,6 +19,8 @@ from backend.app.db.session import get_db
 
 router = APIRouter(prefix='/api/v1/settings', tags=['system-settings'])
 
+
+# NOTE: 系统设置独立于通用管理权限，仅 admin 角色可访问，避免普通管理员修改基础服务配置。
 async def require_system_admin(request: Request, current_user: AuthenticatedUser = Depends(get_current_user)) -> AuthenticatedUser:
     if not current_user.is_system_admin:
         raise HTTPException(403, '仅系统管理员可以管理系统设置')
@@ -38,6 +48,7 @@ async def update_setting(setting_key: str, payload: SystemSettingUpdate, session
     item = await session.scalar(select(SystemSetting).where(SystemSetting.setting_key == setting_key))
     if item is None:
         raise HTTPException(404, '系统配置尚未初始化')
+    # NOTE: 敏感配置空提交代表保持原值，避免前端未回显明文时意外覆盖已生效的密钥。
     # Sensitive values are write-only. An empty value deliberately preserves the existing secret.
     if spec['sensitive'] and not (payload.value or '').strip():
         return serialize(item)

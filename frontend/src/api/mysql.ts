@@ -90,6 +90,7 @@ export type OperationLog = {
   operation: string
   resource_type: string | null
   resource_id: string | null
+  resource_display_name: string | null
   request_ip: string | null
   detail: Record<string, unknown> | null
   created_at: string

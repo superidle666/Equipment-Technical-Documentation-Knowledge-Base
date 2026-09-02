@@ -1,4 +1,10 @@
-﻿/** Browser-side auth session handling for the administration console. */
+/**
+ * 管理端浏览器会话与认证请求封装。
+ *
+ * Note:
+ *     访问令牌和刷新令牌必须始终写入同一存储介质，避免“记住我”切换后误用旧会话。
+ */
+/** Browser-side auth session handling for the administration console. */
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 const ACCESS_TOKEN_KEY = 'kb-admin-access-token'
@@ -38,6 +44,7 @@ function getSessionStorage() {
   return localStorage.getItem(REFRESH_TOKEN_KEY) ? localStorage : sessionStorage
 }
 
+// NOTE: 未勾选“记住我”时仅存入 sessionStorage，关闭浏览器后不保留登录态。
 function saveSession(session: TokenPair, rememberLogin = true) {
   const storage = rememberLogin ? localStorage : sessionStorage
   const otherStorage = rememberLogin ? sessionStorage : localStorage
@@ -79,6 +86,7 @@ async function refreshSession(): Promise<boolean> {
   }
 }
 
+// NOTE: 仅允许一次刷新重试，防止无效令牌造成无限请求循环。
 export async function authenticatedFetch(path: string, options: RequestInit = {}, retried = false): Promise<Response> {
   const accessToken = getStoredItem(ACCESS_TOKEN_KEY)
   const headers = new Headers(options.headers)

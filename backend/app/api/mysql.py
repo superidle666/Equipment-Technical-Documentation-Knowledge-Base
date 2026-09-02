@@ -1,7 +1,10 @@
-"""MySQL-backed administration API.
-
-Permission definitions are owned by the code registry.  API consumers can only view
-registered permissions, toggle their state, and assign them to roles.
+# -*- coding: utf-8 -*-
+"""
+后台管理数据接口。
+@author: 项目维护者
+@date: 2026-09-02
+@desc: 提供用户、角色、权限、知识库、文档和操作日志管理能力。
+@business: 权限由代码注册表约束；软删除数据保留审计与恢复所需历史。
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ from backend.app.core.auth import hash_password, require_management_access
 from backend.app.core.permissions import REGISTERED_PERMISSION_CODES, is_registered_permission
 from backend.app.db.models import (
     Document, DocumentChunk, DocumentTag, Library, LibraryMember, OperationLog,
-    Permission, Role, Tag, User,
+    Permission, Role, SystemSetting, Tag, User,
 )
 from backend.app.db.session import get_db
 
@@ -52,6 +55,62 @@ async def commit(session: AsyncSession, duplicate_message: str) -> None:
 
 
 log = log_operation
+
+
+
+# NOTE: 日志中的资源名称必须批量解析，既避免列表查询产生 N+1 请求，也要保留软删除资源的历史名称。
+async def operation_log_resource_names(
+    session: AsyncSession, logs: list[OperationLog]
+) -> dict[int, str]:
+    """Resolve audit-log resource names in batches, including soft-deleted rows."""
+    names: dict[int, str] = {}
+    model_specs = {
+        "user": (User, User.display_name),
+        "auth_session": (User, User.display_name),
+        "role": (Role, Role.name),
+        "permission": (Permission, Permission.name),
+        "library": (Library, Library.name),
+        "document": (Document, Document.title),
+        "tag": (Tag, Tag.name),
+    }
+    for resource_type, (model, name_column) in model_specs.items():
+        relevant = [
+            item for item in logs
+            if item.resource_type == resource_type and (item.resource_id or "").isdigit()
+        ]
+        ids = [int(item.resource_id) for item in relevant]
+        if not ids:
+            continue
+        rows = await session.execute(
+            select(model.id, name_column).where(model.id.in_(ids))
+        )
+        resolved = {
+            str(item_id): str(display_name)
+            for item_id, display_name in rows
+            if display_name is not None
+        }
+        for item in relevant:
+            if item.resource_id in resolved:
+                names[item.id] = resolved[item.resource_id]
+
+    setting_logs = [
+        item for item in logs
+        if item.resource_type == "system_setting" and item.resource_id
+    ]
+    if setting_logs:
+        keys = [item.resource_id for item in setting_logs]
+        rows = await session.execute(
+            select(SystemSetting.setting_key, SystemSetting.display_name)
+            .where(SystemSetting.setting_key.in_(keys))
+        )
+        resolved = {
+            key: display_name for key, display_name in rows if display_name is not None
+        }
+        for item in setting_logs:
+            if item.resource_id in resolved:
+                names[item.id] = resolved[item.resource_id]
+    return names
+
 
 
 def user_out(user: User) -> dict:
@@ -96,6 +155,8 @@ def document_out(document: Document, *, chunk_count: int = 0, tags: list[str] | 
     }
 
 
+
+# NOTE: 角色只能引用代码注册表中的有效权限，防止后台写入没有对应接口授权规则的权限编码。
 async def resolve_registered_permissions(session: AsyncSession, codes: list[str]) -> list[Permission]:
     requested = list(dict.fromkeys(codes))
     if set(requested) - REGISTERED_PERMISSION_CODES:
@@ -212,11 +273,13 @@ async def update_role(role_id: int, payload: RoleUpdate, session: AsyncSession =
     role = result.scalar_one_or_none()
     if role is None:
         raise HTTPException(404, "角色不存在")
+    status_changed_to = payload.status if payload.status is not None and payload.status != role.status else None
     for field, value in payload.model_dump(exclude_unset=True, exclude={"permission_codes"}).items():
         setattr(role, field, value)
     if payload.permission_codes is not None:
         role.permissions = await resolve_registered_permissions(session, payload.permission_codes)
-    await log(session, "update", "role", role.id)
+    operation = "enable" if status_changed_to == "active" else "disable" if status_changed_to == "disabled" else "update"
+    await log(session, operation, "role", role.id)
     await commit(session, "更新角色失败")
     await session.refresh(role, attribute_names=["permissions"])
     return role_out(role)
@@ -265,9 +328,11 @@ async def create_permission():
 @router.patch("/permissions/{permission_id}", response_model=PermissionOut)
 async def update_permission(permission_id: int, payload: PermissionUpdate, session: AsyncSession = Depends(get_db)):
     permission = await registered_permission_or_404(session, permission_id)
+    status_changed_to = payload.status if payload.status is not None and payload.status != permission.status else None
     if payload.status is not None:
         permission.status = payload.status
-    await log(session, "update", "permission", permission.id)
+    operation = "enable" if status_changed_to == "active" else "disable" if status_changed_to == "disabled" else "update"
+    await log(session, operation, "permission", permission.id)
     await commit(session, "更新权限失败")
     return permission_out(permission)
 
@@ -525,6 +590,8 @@ async def delete_tag(tag_id: int, session: AsyncSession = Depends(get_db)):
     await commit(session, "删除标签失败")
 
 
+
+# 操作日志使用资源名称而非内部编号展示；名称缺失时仍保留资源类型以兼容历史记录。
 @router.get("/operation-logs", response_model=OperationLogPageOut)
 async def list_operation_logs(
     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
@@ -546,6 +613,9 @@ async def list_operation_logs(
     )
     total = await session.scalar(select(func.count()).select_from(OperationLog).where(*filters)) or 0
     rows = (await session.execute(statement.offset((page - 1) * page_size).limit(page_size))).all()
+    resource_display_names = await operation_log_resource_names(
+        session, [item for item, _ in rows]
+    )
     return {
         "items": [
             {
@@ -555,6 +625,7 @@ async def list_operation_logs(
                 "operation": item.operation,
                 "resource_type": item.resource_type,
                 "resource_id": item.resource_id,
+                "resource_display_name": resource_display_names.get(item.id),
                 "request_ip": item.request_ip,
                 "detail": item.detail,
                 "created_at": item.created_at,

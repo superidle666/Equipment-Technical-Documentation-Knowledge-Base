@@ -1,4 +1,11 @@
-"""Authentication HTTP endpoints."""
+# -*- coding: utf-8 -*-
+"""
+后台认证接口。
+@author: 项目维护者
+@date: 2026-09-02
+@desc: 提供登录、刷新令牌、退出登录与当前用户查询。
+@business: 已停用、锁定或软删除的账号不得获取或续期管理会话。
+"""
 
 from __future__ import annotations
 
@@ -55,6 +62,8 @@ async def _issue_pair(session: AsyncSession, user: User) -> tuple[dict, AuthRefr
     }, record
 
 
+
+# 登录成功后在同一事务内更新最近登录时间并写审计日志，避免出现“已登录但无日志”的不一致记录。
 @router.post("/login", response_model=TokenPairOut)
 async def login(payload: LoginRequest, request: Request, session: AsyncSession = Depends(get_db)):
     result = await session.execute(
@@ -72,6 +81,8 @@ async def login(payload: LoginRequest, request: Request, session: AsyncSession =
     return result
 
 
+
+# NOTE: 刷新令牌采用轮换策略，旧令牌在签发新令牌后必须立即撤销，降低泄露后的可用窗口。
 @router.post("/refresh", response_model=TokenPairOut)
 async def refresh(payload: RefreshTokenRequest, session: AsyncSession = Depends(get_db)):
     try:

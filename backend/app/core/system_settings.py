@@ -1,11 +1,22 @@
-"""Registered settings and encrypted value helpers."""
+# -*- coding: utf-8 -*-
+"""
+系统配置注册表与加密工具。
+@author: 项目维护者
+@date: 2026-09-02
+@desc: 声明可在线维护的配置项，并提供加密、脱敏和格式校验能力。
+@business: 配置键由代码注册表维护；数据库只保存加密值，敏感内容不得写入日志或响应。
+"""
+
 from __future__ import annotations
+
 import os
 from urllib.parse import urlparse
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
 from backend.app.core.config import settings
 
+
+# 配置项白名单：未在此注册的环境变量或配置键不能通过管理端修改。
 SETTING_SPECS = (
     {'key':'model.chat_api_key','name':'聊天模型 API Key','category':'model','sensitive':True,'description':'聊天模型访问密钥。','default':lambda: os.getenv('OPENAI_API_KEY','')},
     {'key':'model.chat_base_url','name':'聊天模型地址','category':'model','sensitive':False,'description':'聊天模型 API 基础地址。','kind':'url','default':lambda: os.getenv('OPENAI_API_BASE','https://dashscope.aliyuncs.com/compatible-mode/v1')},
@@ -36,6 +47,8 @@ def decrypt_value(value: str | None) -> str | None:
     if value is None: return None
     try: return _fernet().decrypt(value.encode('ascii')).decode('utf-8')
     except InvalidToken as exc: raise RuntimeError('system setting cannot be decrypted with SETTINGS_ENCRYPTION_KEY') from exc
+
+# NOTE: 脱敏展示仅用于提示配置是否存在，不能用于还原或替代实际密钥。
 def mask_value(value: str | None) -> str | None:
     if not value: return None
     return '*' * len(value) if len(value)<=4 else value[:3]+'****'+value[-3:]

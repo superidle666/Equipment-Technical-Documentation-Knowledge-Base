@@ -1,4 +1,11 @@
 <!-- 管理端操作日志页面。 -->
+<!--
+ * @FilePath: @/pages/admin/sessions/index.vue
+ * @Author: 项目维护者
+ * @Date: 2026-09-02
+ * @Description: 管理端操作日志查询页面，支持按资源和操作类型筛选。
+ * @BusinessRule: 日志资源优先展示业务名称，不暴露仅对数据库排查有意义的内部编号。
+-->
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { RefreshIcon } from 'tdesign-icons-vue-next'
@@ -33,6 +40,8 @@ const operationOptions = [
   { label: '更新', value: 'update' },
   { label: '删除', value: 'delete' },
   { label: '恢复', value: 'restore' },
+  { label: '启用', value: 'enable' },
+  { label: '停用', value: 'disable' },
   { label: '上传', value: 'upload' },
 ]
 
@@ -48,13 +57,19 @@ const columns = [
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
 function operationLabel(value: string) {
-  return ({ login: '登录', logout: '退出登录', create: '创建', update: '更新', delete: '删除', restore: '恢复', upload: '上传', update_tags: '更新标签', add_member: '添加成员', remove_member: '移除成员' } as Record<string, string>)[value] || value
+  return ({ login: '登录', logout: '退出登录', create: '创建', update: '更新', delete: '删除', restore: '恢复', enable: '启用', disable: '停用', upload: '上传', update_tags: '更新标签', add_member: '添加成员', remove_member: '移除成员' } as Record<string, string>)[value] || value
 }
 
 function resourceLabel(value: string | null) {
-  return ({ auth_session: '认证会话', user: '用户', role: '角色', permission: '权限', library: '知识库', document: '文档', tag: '标签', library_member: '知识库成员' } as Record<string, string>)[value || ''] || value || '-'
+  return ({ auth_session: '认证会话', user: '用户', role: '角色', permission: '权限', library: '知识库', document: '文档', tag: '标签', library_member: '知识库成员', system_setting: '系统设置' } as Record<string, string>)[value || ''] || value || '-'
 }
 
+function resourceText(row: OperationLog) {
+  const type = resourceLabel(row.resource_type)
+  const name = row.resource_display_name
+  return name ? type + '：' + name : type
+}
+/** 将结构化变更信息转换为表格中的简短摘要。 */
 function detailText(detail: Record<string, unknown> | null) {
   if (!detail || !Object.keys(detail).length) return '-'
   return Object.entries(detail).map(([key, value]) => key + ': ' + String(value)).join('；')
@@ -121,7 +136,7 @@ onMounted(() => { void loadLogs() })
           <t-tag variant="light" theme="primary">{{ operationLabel(row.operation) }}</t-tag>
         </template>
         <template #resource="{ row }">
-          <span>{{ resourceLabel(row.resource_type) }}<template v-if="row.resource_id"> #{{ row.resource_id }}</template></span>
+          <span>{{ resourceText(row) }}</span>
         </template>
         <template #actor="{ row }">{{ row.user_display_name || (row.user_id ? '用户 #' + row.user_id : '-') }}</template>
         <template #ip="{ row }">{{ row.request_ip || '-' }}</template>

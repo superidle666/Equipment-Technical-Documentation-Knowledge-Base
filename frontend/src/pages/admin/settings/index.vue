@@ -1,3 +1,10 @@
+<!--
+ * @FilePath: @/pages/admin/settings/index.vue
+ * @Author: 项目维护者
+ * @Date: 2026-09-02
+ * @Description: 系统设置页面，用于维护模型、向量检索、文档和站点配置。
+ * @BusinessRule: 敏感配置仅可写入，页面绝不回显明文；访问权限由后端限定为系统管理员。
+-->
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { RefreshIcon } from 'tdesign-icons-vue-next'
@@ -22,6 +29,7 @@ const groups = computed(() => categoryOrder
   .map((category) => ({ category, name: categoryNames[category], items: settings.value.filter((item) => item.category === category) }))
   .filter((group) => group.items.length))
 
+// NOTE: 敏感值即使后端存在，也只在本次输入期间显示，避免二次渲染泄露明文。
 function displayValue(item: SystemSetting) {
   return drafts.value[item.key] ?? (item.is_sensitive ? '' : item.value || '')
 }
@@ -39,6 +47,7 @@ async function loadSettings() {
   }
 }
 
+/** 保存单项配置；敏感值保存后立即清空前端草稿。 */
 async function saveSetting(item: SystemSetting) {
   savingKey.value = item.key
   errorMessage.value = ''
@@ -105,8 +114,10 @@ onMounted(() => { void loadSettings() })
 </template>
 
 <style scoped>
-.settings-runtime { align-items: start; }
-.setting-edit-row { padding: 14px 0; }
+.settings-runtime { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px; }
+.settings-runtime .settings-panel { padding: 20px; }
+.settings-runtime .settings-panel h2 { margin: 0; padding-bottom: 16px; }
+.setting-edit-row { min-height: 0; padding: 16px 0; gap: 20px; }
 .setting-copy { min-width: 0; }
 .setting-editor { width: min(100%, 360px); display: flex; align-items: center; gap: 8px; }
 .setting-editor :deep(.t-input) { flex: 1; min-width: 0; }

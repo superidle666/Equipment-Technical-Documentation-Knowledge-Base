@@ -1,3 +1,10 @@
+<!--
+ * @FilePath: @/pages/admin/index.vue
+ * @Author: 项目维护者
+ * @Date: 2026-09-02
+ * @Description: 管理端入口，负责登录、会话恢复与后台模块切换。
+ * @BusinessRule: 系统设置仅对 admin 角色可见；“记住我”仅在用户主动勾选后保存本机凭据。
+-->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -40,6 +47,8 @@ const password = ref('')
 const loginError = ref('')
 const loginLoading = ref(false)
 const rememberLogin = ref(true)
+// NOTE: 退出登录只撤销令牌会话；已勾选“记住我”的本机凭据需要保留并在登录页回填。
+const REMEMBERED_CREDENTIALS_KEY = 'kb-admin-remembered-credentials'
 const activeNav = ref<NavKey>('dashboard')
 const collapsed = ref(false)
 const mobileOpen = ref(false)
@@ -80,6 +89,14 @@ async function login() {
   loginLoading.value = true
   try {
     account.value = await loginWithPassword(username.value.trim(), password.value, rememberLogin.value)
+    if (rememberLogin.value) {
+      localStorage.setItem(REMEMBERED_CREDENTIALS_KEY, JSON.stringify({
+        username: username.value.trim(),
+        password: password.value,
+      }))
+    } else {
+      localStorage.removeItem(REMEMBERED_CREDENTIALS_KEY)
+    }
     isAuthenticated.value = true
     password.value = ''
     await router.replace({ name: 'admin' })
@@ -90,12 +107,28 @@ async function login() {
   }
 }
 
+/**
+ * 退出当前管理会话并恢复已选择保存的本机凭据。
+ *
+ * Note:
+ *     登录会话与“记住我”凭据是两类状态，退出不能意外清除用户的登录偏好。
+ */
 async function logout() {
   await logoutSession()
   isAuthenticated.value = false
   account.value = null
-  username.value = ''
-  password.value = ''
+  loginError.value = ''
+  try {
+    const saved = JSON.parse(localStorage.getItem(REMEMBERED_CREDENTIALS_KEY) || 'null')
+    username.value = typeof saved?.username === 'string' ? saved.username : ''
+    password.value = typeof saved?.password === 'string' ? saved.password : ''
+    rememberLogin.value = Boolean(username.value && password.value)
+  } catch {
+    localStorage.removeItem(REMEMBERED_CREDENTIALS_KEY)
+    username.value = ''
+    password.value = ''
+    rememberLogin.value = false
+  }
   await router.replace({ name: 'admin-login' })
 }
 
@@ -116,6 +149,16 @@ function updateCounts(nextCounts: Partial<AdminCounts>) {
 
 onMounted(() => {
   window.addEventListener('auth-expired', handleExpired)
+  try {
+    const saved = JSON.parse(localStorage.getItem(REMEMBERED_CREDENTIALS_KEY) || 'null')
+    if (saved && typeof saved.username === 'string' && typeof saved.password === 'string') {
+      username.value = saved.username
+      password.value = saved.password
+      rememberLogin.value = true
+    }
+  } catch {
+    localStorage.removeItem(REMEMBERED_CREDENTIALS_KEY)
+  }
   if (route.name === 'admin' && hasAccessToken()) void loadCurrentUser()
 })
 
@@ -166,7 +209,7 @@ onBeforeUnmount(() => {
           </t-input>
         </div>
         <div class="login-options">
-          <t-checkbox v-model="rememberLogin">记住登录</t-checkbox>
+          <t-checkbox v-model="rememberLogin">记住我</t-checkbox>
         </div>
         <div v-if="loginError" class="login-error" role="alert">{{ loginError }}</div>
         <t-button theme="primary" block size="large" type="submit" :loading="loginLoading">

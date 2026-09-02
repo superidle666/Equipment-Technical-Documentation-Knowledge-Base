@@ -1,4 +1,11 @@
-﻿<script setup lang="ts">
+<!--
+ * @FilePath: @/pages/admin/roles/index.vue
+ * @Author: 项目维护者
+ * @Date: 2026-09-02
+ * @Description: 角色管理页面，支持角色维护、软删除恢复与权限分配。
+ * @BusinessRule: 管理权限勾选时同步子权限；系统管理员角色不可在页面内修改或删除。
+-->
+<script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { AddIcon } from 'tdesign-icons-vue-next'
 import { mysqlApi, type Permission, type Role } from '../../../api/mysql'
@@ -82,8 +89,14 @@ function validateEditRole() {
   return editRole.value.name.trim() ? '' : '请输入角色名称。'
 }
 
-function getStatusTheme(status: Role['status']) {
-  return status === 'active' ? 'success' : 'default'
+function getStatusTheme(row: Role) {
+  if (row.deleted_at) return 'danger'
+  return row.status === 'active' ? 'success' : 'default'
+}
+
+function statusLabel(row: Role) {
+  if (row.deleted_at) return '已删除'
+  return row.status === 'active' ? '已启用' : '已停用'
 }
 
 function parentChecked(form: { permission_codes: string[] }, group: PermissionGroup) {
@@ -100,6 +113,7 @@ function childChecked(form: { permission_codes: string[] }, child: Permission) {
   return form.permission_codes.includes(child.code)
 }
 
+// NOTE: 父级“管理权限”代表整个模块，选中或取消时必须同步全部子权限。
 function toggleParent(form: { permission_codes: string[] }, group: PermissionGroup, checked: unknown) {
   const groupCodes = [group.parent, ...group.children].map((permission) => permission.code)
   const selected = new Set(form.permission_codes)
@@ -119,6 +133,7 @@ function toggleChild(form: { permission_codes: string[] }, group: PermissionGrou
   form.permission_codes = [...selected]
 }
 
+// NOTE: 系统管理员角色必须保持可用，避免后台失去唯一管理入口。
 async function toggleRoleStatus(row: Role) {
   if (isSystemAdminRole(row.code) || savingRole.value) return
   savingRole.value = true
@@ -273,8 +288,8 @@ onMounted(() => {
           <t-tag theme="primary" variant="light">{{ row.permissions.length }} 项权限</t-tag>
         </template>
         <template #status="{ row }">
-          <t-tag :theme="getStatusTheme(row.status)" variant="light">
-            {{ row.status === 'active' ? '已启用' : '已停用' }}
+          <t-tag :theme="getStatusTheme(row)" variant="light">
+            {{ statusLabel(row) }}
           </t-tag>
         </template>
         <template #op="{ row }">

@@ -1,4 +1,11 @@
-"""Audit logging helpers for authenticated administration actions."""
+# -*- coding: utf-8 -*-
+"""
+后台操作审计工具。
+@author: 项目维护者
+@date: 2026-09-02
+@desc: 绑定请求操作者上下文并在业务事务中记录管理操作。
+@business: 审计详情必须过滤密码、令牌和密钥等敏感字段。
+"""
 
 from __future__ import annotations
 
@@ -34,6 +41,8 @@ def bind_audit_context(user: 'AuthenticatedUser', request: Request) -> None:
     _audit_request_ip.set(request_ip(request))
 
 
+
+# NOTE: 审计日志用于追踪行为而非存储认证材料，敏感字段必须在写库前统一剔除。
 def _safe_detail(detail: dict[str, Any] | None) -> dict[str, Any] | None:
     if not detail:
         return None

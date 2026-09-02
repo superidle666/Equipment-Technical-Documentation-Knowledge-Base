@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+权限注册表及同步逻辑。
+@author: 项目维护者
+@date: 2026-09-02
+@desc: 定义可授予权限及其父子层级，并在应用启动时同步到数据库。
+@business: 父级管理权限包含该模块全部子权限，数据库不能自由创建未注册权限。
+"""
 """权限注册表及其数据库同步逻辑。"""
 
 from collections.abc import Iterator
@@ -8,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import Permission
 
 
+
+# 权限定义的唯一来源：接口授权和后台分配都必须使用此注册表，防止出现无实际校验能力的权限。
 PERMISSION_REGISTRY = {
     "library:manage": {
         "name": "管理知识库",
@@ -86,6 +96,8 @@ def is_registered_permission(code: str) -> bool:
     return code in REGISTERED_PERMISSION_CODES
 
 
+
+# NOTE: 分配父级“管理”权限时，鉴权阶段自动展开全部子权限，前端勾选逻辑与后端鉴权保持一致。
 def expand_permissions(codes: set[str] | frozenset[str]) -> frozenset[str]:
     """Return effective permissions, including children of selected managers."""
 
