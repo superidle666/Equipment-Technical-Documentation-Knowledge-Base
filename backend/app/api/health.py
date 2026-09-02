@@ -1,47 +1,36 @@
-"""Liveness and API discovery endpoints."""
+"""服务存活、数据库探针和 API 能力发现接口。"""
 
 from fastapi import APIRouter
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.app.core.config import settings
-
+from backend.app.db.session import SessionLocal
 
 router = APIRouter(tags=["system"])
 
 
 @router.get("/health", summary="服务健康检查")
 async def health() -> dict:
-    """Return a lightweight liveness response without external dependencies."""
+    """返回 API 进程的基础运行状态。"""
+    return {"code": 0, "message": "ok", "data": {"status": "ok", "service": "knowledge-base-api", "version": settings.app_version, "environment": settings.environment}}
 
-    return {
-        "code": 0,
-        "message": "ok",
-        "data": {
-            "status": "ok",
-            "service": "knowledge-base-api",
-            "version": settings.app_version,
-            "environment": settings.environment,
-        },
-    }
+
+@router.get("/health/db", summary="MySQL 数据库健康检查")
+async def database_health() -> dict:
+    """检查 MySQL 连通性。
+
+    数据库异常转换为业务状态响应，避免健康检查本身产生 500。
+    """
+    try:
+        async with SessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+        return {"code": 0, "message": "ok", "data": {"status": "ok", "database": "mysql"}}
+    except SQLAlchemyError:
+        return {"code": 1, "message": "database unavailable", "data": {"status": "error", "database": "mysql"}}
 
 
 @router.get("/api", summary="API 能力列表")
 async def api_index() -> dict:
-    """Describe the stable mounted API groups during the migration period."""
-
-    return {
-        "code": 0,
-        "message": "ok",
-        "data": {
-            "name": settings.app_name,
-            "version": settings.app_version,
-            "groups": {
-                "import": f"{settings.api_v1_prefix}/import",
-                "chat": f"{settings.api_v1_prefix}/chat",
-            },
-            "legacy_services": {
-                "import": "web/api/import_service.py (default port 8000)",
-                "chat": "web/api/query_service.py (default port 8001)",
-            },
-        },
-    }
-
+    """列出统一入口下的主要 API 分组及旧服务兼容地址。"""
+    return {"code": 0, "message": "ok", "data": {"name": settings.app_name, "version": settings.app_version, "groups": {"import": f"{settings.api_v1_prefix}/import", "chat": f"{settings.api_v1_prefix}/chat", "mysql": f"{settings.api_v1_prefix}"}, "legacy_services": {"import": "web/api/import_service.py (default port 8000)", "chat": "web/api/query_service.py (default port 8001)"}}}

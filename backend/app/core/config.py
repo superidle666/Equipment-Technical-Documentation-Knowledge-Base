@@ -1,8 +1,6 @@
-"""Centralized configuration for the unified API service.
+"""统一 API 服务配置。
 
-This module intentionally contains only configuration that is needed by the
-API shell. Feature-specific settings remain in the existing config modules
-until their services are migrated.
+当前仅集中管理 API 外壳所需配置，旧业务服务迁移完成前仍保留其专属配置。
 """
 
 from dataclasses import dataclass
@@ -15,7 +13,7 @@ load_dotenv()
 
 
 def _csv(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
-    """Parse a comma-separated environment variable into non-empty values."""
+    """解析逗号分隔的环境变量，并过滤空白项。"""
 
     if not value:
         return default
@@ -25,7 +23,7 @@ def _csv(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Settings:
-    """Settings used by the unified FastAPI shell."""
+    """统一 FastAPI 外壳使用的运行参数。"""
 
     app_name: str = os.getenv(
         "APP_NAME", "设备技术文档智能知识库平台"
@@ -38,5 +36,13 @@ class Settings:
     )
 
 
+    mysql_url: str = os.getenv("MYSQL_URL", "mysql+asyncmy://knowledge:knowledge@127.0.0.1:3306/knowledge_base?charset=utf8mb4")
+    sql_echo: bool = os.getenv("SQL_ECHO", "0").lower() in {"1", "true", "yes"}
+    # JWT 密钥只允许通过环境变量注入，应用启动时会校验其存在。
+    jwt_secret: str = os.getenv("JWT_SECRET", "")
+    jwt_access_token_minutes: int = int(os.getenv("JWT_ACCESS_TOKEN_MINUTES", "30"))
+    jwt_refresh_token_days: int = int(os.getenv("JWT_REFRESH_TOKEN_DAYS", "7"))
+    # Dedicated environment-only encryption key for persisted sensitive settings.
+    settings_encryption_key: str = os.getenv("SETTINGS_ENCRYPTION_KEY", "")
 settings = Settings()
 
