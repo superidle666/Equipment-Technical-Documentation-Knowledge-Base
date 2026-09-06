@@ -1,4 +1,6 @@
 import { authenticatedFetch } from './auth'
+import request from '../utils/request'
+import type { DocumentStatus } from '../constants'
 
 export type User = {
   id: number
@@ -22,6 +24,13 @@ export type Library = {
   created_at: string
   updated_at: string
   deleted_at: string | null
+  entity_recognition_mode: "disabled" | "optional" | "required"
+  allowed_file_types: string[] | null
+  max_file_size_mb: number | null
+  max_document_count: number | null
+  max_upload_file_count: number | null
+  chunking_config: Record<string, unknown> | null
+  visibility: "private" | "shared"
 }
 
 export type Document = {
@@ -33,7 +42,7 @@ export type Document = {
   mime_type: string | null
   file_size: number | null
   file_hash: string | null
-  status: string
+  status: DocumentStatus
   created_at: string
   updated_at: string
   chunk_count?: number
@@ -41,6 +50,25 @@ export type Document = {
   library_name?: string | null
 }
 
+export type ImportTask = {
+  id: number
+  library_id: number
+  document_id: number
+  status: string
+  current_step: string | null
+  progress: number
+  config_snapshot: Record<string, unknown> | null
+  entity_result: Record<string, unknown> | null
+  chunk_count: number | null
+  error_message: string | null
+  created_by: number | null
+  created_at: string
+  updated_at: string
+  started_at: string | null
+  finished_at: string | null
+  document_title: string | null
+  library_name: string | null
+}
 export type DocumentChunk = {
   id: number
   document_id: number
@@ -133,26 +161,8 @@ function getApiErrorMessage(body: unknown, fallback: string): string {
 }
 
 /** 发送 JSON 请求并统一处理 FastAPI 错误响应。 */
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  let response: Response
-  try {
-    response = await authenticatedFetch(path, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers || {}),
-      },
-    })
-  } catch {
-    throw new Error('无法连接后端服务，请确认 FastAPI 服务已启动')
-  }
-  const body = await response.json().catch(() => null)
-
-  if (!response.ok) {
-    throw new Error(getApiErrorMessage(body, `请求失败（${response.status}）`))
-  }
-
-  return body as T
+async function requestApi<T>(path: string, options: RequestInit = {}): Promise<T> {
+  return request<T>(path, options)
 }
 
 /** 统一封装管理端用户、权限、知识库和文档接口。 */
@@ -160,101 +170,105 @@ export const mysqlApi = {
   // 用户与访问控制
   listUsers: (params = '') => {
     const query = params ? `?${params}` : ''
-    return request<User[]>(`/api/v1/users${query}`)
+    return requestApi<User[]>(`/api/v1/users${query}`)
   },
   createUser: (payload: Record<string, unknown>) => {
-    return request<User>('/api/v1/users', {
+    return requestApi<User>('/api/v1/users', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
   },
   updateUser: (id: number, payload: Record<string, unknown>) => {
-    return request<User>(`/api/v1/users/${id}`, {
+    return requestApi<User>(`/api/v1/users/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     })
   },
   deleteUser: (id: number) => {
-    return request<{ message: string }>(`/api/v1/users/${id}`, {
+    return requestApi<{ message: string }>(`/api/v1/users/${id}`, {
       method: 'DELETE',
     })
   },
   // 角色和权限字典
   listRoles: (params = '') => {
     const query = params ? '?' + params : ''
-    return request<Role[]>('/api/v1/roles' + query)
+    return requestApi<Role[]>('/api/v1/roles' + query)
   },
   createRole: (payload: Record<string, unknown>) => {
-    return request<Role>('/api/v1/roles', {
+    return requestApi<Role>('/api/v1/roles', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
   },
   updateRole: (id: number, payload: Record<string, unknown>) => {
-    return request<Role>(`/api/v1/roles/${id}`, {
+    return requestApi<Role>(`/api/v1/roles/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     })
   },
   listPermissions: (params = '') => {
     const query = params ? '?' + params : ''
-    return request<Permission[]>('/api/v1/permissions' + query)
+    return requestApi<Permission[]>('/api/v1/permissions' + query)
   },
   deleteRole: (id: number, deletedBy?: number) => {
     const query = deletedBy ? '?deleted_by=' + deletedBy : ''
-    return request<{ message: string }>('/api/v1/roles/' + id + query, { method: 'DELETE' })
+    return requestApi<{ message: string }>('/api/v1/roles/' + id + query, { method: 'DELETE' })
   },
-  restoreRole: (id: number) => request<Role>('/api/v1/roles/' + id + '/restore', { method: 'POST' }),
+  restoreRole: (id: number) => requestApi<Role>('/api/v1/roles/' + id + '/restore', { method: 'POST' }),
   updatePermission: (id: number, payload: Record<string, unknown>) => {
-    return request<Permission>(`/api/v1/permissions/${id}`, {
+    return requestApi<Permission>(`/api/v1/permissions/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     })
   },
   // 知识库、文档及审计数据
   listLibraries: (includeDisabled = true, includeDeleted = false) => {
-    return request<Library[]>(
+    return requestApi<Library[]>(
       `/api/v1/libraries?include_disabled=${includeDisabled}&include_deleted=${includeDeleted}`,
     )
   },
   createLibrary: (payload: Record<string, unknown>) => {
-    return request<Library>('/api/v1/libraries', {
+    return requestApi<Library>('/api/v1/libraries', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
   },
   updateLibrary: (id: number, payload: Record<string, unknown>) => {
-    return request<Library>(`/api/v1/libraries/${id}`, {
+    return requestApi<Library>(`/api/v1/libraries/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     })
   },
   deleteLibrary: (id: number) => {
-    return request<{ message: string }>(`/api/v1/libraries/${id}`, {
+    return requestApi<{ message: string }>(`/api/v1/libraries/${id}`, {
       method: 'DELETE',
     })
   },
   restoreLibrary: (id: number) => {
-    return request<Library>(`/api/v1/libraries/${id}/restore`, {
+    return requestApi<Library>(`/api/v1/libraries/${id}/restore`, {
       method: 'POST',
     })
   },
+  listImportTasks: (params = '') => requestApi<ImportTask[]>('/api/v1/import-tasks' + (params ? '?' + params : '')),
+  getImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id),
+  retryImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/retry', { method: 'POST' }),
+  cancelImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/cancel', { method: 'POST' }),
+  deleteImportTask: (id: number) => requestApi<void>('/api/v1/import-tasks/' + id, { method: 'DELETE' }),
   listDocuments: (params = '') => {
     const query = params ? `?${params}` : ''
-    return request<Document[]>(`/api/v1/documents${query}`)
+    return requestApi<Document[]>(`/api/v1/documents${query}`)
   },
-  getDocument: (id: number) => request<Document>(`/api/v1/documents/${id}`),
+  getDocument: (id: number) => requestApi<Document>(`/api/v1/documents/${id}`),
   createDocument: (payload: Record<string, unknown>) => {
-    return request<Document>('/api/v1/documents', {
+    return requestApi<Document>('/api/v1/documents', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
   },
-  uploadDocument: async (file: File, libraryId: number, title?: string) => {
+  uploadDocuments: async (files: File[], libraryId: number) => {
     const form = new FormData()
-    form.append('file', file)
+    files.forEach((file) => form.append('files', file))
     form.append('library_id', String(libraryId))
-    if (title?.trim()) form.append('title', title.trim())
     let response: Response
     try {
       response = await authenticatedFetch('/api/v1/documents/upload', {
@@ -268,55 +282,55 @@ export const mysqlApi = {
     if (!response.ok) {
       throw new Error(getApiErrorMessage(body, `请求失败（${response.status}）`))
     }
-    return body as Document
+    return body as Document[]
   },
   updateDocument: (id: number, payload: Record<string, unknown>) => {
-    return request<Document>(`/api/v1/documents/${id}`, {
+    return requestApi<Document>(`/api/v1/documents/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     })
   },
   deleteDocument: (id: number) => {
-    return request<{ message: string }>(`/api/v1/documents/${id}`, {
+    return requestApi<{ message: string }>(`/api/v1/documents/${id}`, {
       method: 'DELETE',
     })
   },
   listChunks: (id: number, params = '') => {
     const query = params ? `?${params}` : ''
-    return request<DocumentChunk[]>(`/api/v1/documents/${id}/chunks${query}`)
+    return requestApi<DocumentChunk[]>(`/api/v1/documents/${id}/chunks${query}`)
   },
   updateDocumentTags: (id: number, tagNames: string[]) => {
-    return request<Document>(`/api/v1/documents/${id}/tags`, {
+    return requestApi<Document>(`/api/v1/documents/${id}/tags`, {
       method: 'PUT',
       body: JSON.stringify({ tag_names: tagNames }),
     })
   },
-  listTags: () => request<Tag[]>('/api/v1/tags'),
+  listTags: () => requestApi<Tag[]>('/api/v1/tags'),
   createTag: (name: string) => {
-    return request<Tag>('/api/v1/tags', {
+    return requestApi<Tag>('/api/v1/tags', {
       method: 'POST',
       body: JSON.stringify({ name }),
     })
   },
   updateTag: (id: number, name: string) => {
-    return request<Tag>(`/api/v1/tags/${id}`, {
+    return requestApi<Tag>(`/api/v1/tags/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ name }),
     })
   },
   deleteTag: (id: number) => {
-    return request<{ message: string }>(`/api/v1/tags/${id}`, {
+    return requestApi<{ message: string }>(`/api/v1/tags/${id}`, {
       method: 'DELETE',
     })
   },
-  listSettings: () => request<SystemSetting[]>('/api/v1/settings'),
+  listSettings: () => requestApi<SystemSetting[]>('/api/v1/settings'),
   updateSetting: (key: string, value: string | null) => {
-    return request<SystemSetting>('/api/v1/settings/' + encodeURIComponent(key), {
+    return requestApi<SystemSetting>('/api/v1/settings/' + encodeURIComponent(key), {
       method: 'PATCH',
       body: JSON.stringify({ value }),
     })
   },  listLogs: (params = '') => {
     const query = params ? '?' + params : ''
-    return request<OperationLogPage>('/api/v1/operation-logs' + query)
+    return requestApi<OperationLogPage>('/api/v1/operation-logs' + query)
   },
 }

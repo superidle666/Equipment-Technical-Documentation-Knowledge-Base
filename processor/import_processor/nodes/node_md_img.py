@@ -56,13 +56,25 @@ class NodeMDImg(BaseNode):
             return state
 
         # 步骤3：调用多模态大模型生成图片摘要
-        summaries = self._step_3_generate_summaries(md_path_obj.stem, target_images)
+        try:
+            summaries = self._step_3_generate_summaries(md_path_obj.stem, target_images)
+        except Exception as exc:
+            self.logger.exception("图片摘要批处理失败，继续导入正文：%s", exc)
+            summaries = {image_file: "图片描述" for image_file, _, _ in target_images}
 
         # 步骤4：上传图片至MinIO，替换MD图片路径并填充摘要
-        new_md_content = self._step_4_upload_and_replace(md_path_obj.stem, target_images, summaries, md_content)
+        try:
+            new_md_content = self._step_4_upload_and_replace(md_path_obj.stem, target_images, summaries, md_content)
+        except Exception as exc:
+            self.logger.exception("图片上传或引用替换失败，继续导入正文：%s", exc)
+            new_md_content = md_content
 
         # 步骤5：备份并保存新MD文件
-        new_md_file_name = self._step_5_backup_new_md_file(state['md_path'], new_md_content)
+        try:
+            new_md_file_name = self._step_5_backup_new_md_file(state['md_path'], new_md_content)
+        except Exception as exc:
+            self.logger.exception("图片处理结果备份失败，继续使用当前正文内容：%s", exc)
+            new_md_file_name = state["md_path"]
 
         # 步骤6：更新state状态值
         state["md_content"] = new_md_content
@@ -232,10 +244,9 @@ class NodeMDImg(BaseNode):
            - root_folder: 文档所属文件夹名（提供更多上下文）。
            - image_content: 图片在文档中的上下文 (前文, 后文)。
         """
-        with open(image_path, "rb") as img_file:
-            base64_image = base64.b64encode(img_file.read()).decode("utf-8")
-
         try:
+            with open(image_path, "rb") as img_file:
+                base64_image = base64.b64encode(img_file.read()).decode("utf-8")
             chat_model = ChatOpenAI(
                 model=lm_config.vl_model,
                 api_key=lm_config.api_key,

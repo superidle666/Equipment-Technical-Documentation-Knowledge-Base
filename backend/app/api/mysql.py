@@ -10,12 +10,13 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+import logging
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -23,18 +24,21 @@ from sqlalchemy.orm import selectinload
 from backend.app.api.schemas import (
     ChunkOut, DocumentCreate, DocumentDetailOut, DocumentListOut, DocumentTagsUpdate,
     DocumentUpdate, DocumentUploadOut, LibraryCreate, LibraryOut, LibraryUpdate,
-    MemberCreate, MemberOut, OperationLogOut, OperationLogPageOut, PermissionOut, PermissionUpdate,
+    ImportTaskOut, MemberCreate, MemberOut, OperationLogOut, OperationLogPageOut, PermissionOut, PermissionUpdate,
     RoleCreate, RoleOut, RoleUpdate, TagCreate, TagOut, TagUpdate, UserCreate,
     UserOut, UserUpdate,
 )
 from backend.app.core.audit import log_operation
-from backend.app.core.auth import hash_password, require_management_access
+from backend.app.core.auth import AuthenticatedUser, get_current_user, hash_password, require_management_access
 from backend.app.core.permissions import REGISTERED_PERMISSION_CODES, is_registered_permission
 from backend.app.db.models import (
-    Document, DocumentChunk, DocumentTag, Library, LibraryMember, OperationLog,
+    Document, DocumentChunk, DocumentTag, ImportTask, Library, LibraryMember, OperationLog,
     Permission, Role, SystemSetting, Tag, User,
 )
 from backend.app.db.session import get_db
+from config.milvus_config import milvus_config
+from utils.import_queue import enqueue_import_task, request_import_cancellation
+from utils.milvus_utils import get_milvus_client
 
 router = APIRouter(prefix="/api/v1", tags=["mysql"], dependencies=[Depends(require_management_access)])
 
@@ -55,6 +59,32 @@ async def commit(session: AsyncSession, duplicate_message: str) -> None:
 
 
 log = log_operation
+
+ALLOWED_DOCUMENT_EXTENSIONS = frozenset({".pdf", ".md"})
+IMPORT_TASK_STATUSES = frozenset({"queued", "processing", "completed", "failed", "cancelled"})
+
+def validate_library_rules(payload: dict) -> None:
+    """Validate rule values stored on a knowledge base."""
+    allowed = payload.get("allowed_file_types")
+    if allowed is not None:
+        normalized = {str(item).strip().lower().lstrip(".") for item in allowed if str(item).strip()}
+        if normalized - {"pdf", "md"}:
+            raise HTTPException(400, "当前仅支持 PDF 和 Markdown 文件")
+    mode = payload.get("entity_recognition_mode")
+    chunking_config = payload.get("chunking_config")
+    if chunking_config is not None:
+        if not isinstance(chunking_config, dict):
+            raise HTTPException(400, "切片配置必须为对象")
+        unknown_keys = set(chunking_config) - {"chunk_size", "chunk_overlap"}
+        if unknown_keys:
+            raise HTTPException(400, "切片配置包含不支持的字段")
+        chunk_size = chunking_config.get("chunk_size")
+        chunk_overlap = chunking_config.get("chunk_overlap", 0)
+        if not isinstance(chunk_size, int) or chunk_size < 1:
+            raise HTTPException(400, "切片长度必须为正整数")
+        if not isinstance(chunk_overlap, int) or chunk_overlap < 0 or chunk_overlap >= chunk_size:
+            raise HTTPException(400, "切片重叠必须为非负整数且小于切片长度")
+
 
 
 
@@ -90,6 +120,18 @@ async def operation_log_resource_names(
             if display_name is not None
         }
         for item in relevant:
+            if item.resource_id in resolved:
+                names[item.id] = resolved[item.resource_id]
+
+    import_task_logs = [
+        item for item in logs
+        if item.resource_type == "import_task" and (item.resource_id or "").isdigit()
+    ]
+    if import_task_logs:
+        ids = [int(item.resource_id) for item in import_task_logs]
+        rows = await session.execute(select(ImportTask.id, Document.title).join(Document, Document.id == ImportTask.document_id).where(ImportTask.id.in_(ids)))
+        resolved = {str(task_id): str(title) for task_id, title in rows if title is not None}
+        for item in import_task_logs:
             if item.resource_id in resolved:
                 names[item.id] = resolved[item.resource_id]
 
@@ -149,7 +191,7 @@ def document_out(document: Document, *, chunk_count: int = 0, tags: list[str] | 
         "mime_type": document.mime_type, "file_size": document.file_size,
         "file_hash": document.file_hash, "version": document.version, "status": document.status,
         "parse_error": document.parse_error, "uploaded_by": document.uploaded_by,
-        "published_at": document.published_at, "created_at": document.created_at,
+        "published_at": document.published_at, "deleted_by": document.deleted_by, "created_at": document.created_at,
         "updated_at": document.updated_at, "chunk_count": chunk_count, "tags": tags or [],
         "library_name": library_name,
     }
@@ -358,19 +400,36 @@ async def list_libraries(include_deleted: bool = Query(False), session: AsyncSes
 
 
 @router.post("/libraries", response_model=LibraryOut, status_code=status.HTTP_201_CREATED)
-async def create_library(payload: LibraryCreate, session: AsyncSession = Depends(get_db)):
+async def create_library(
+    payload: LibraryCreate,
+    session: AsyncSession = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    if payload.entity_recognition_mode != "disabled" and not current_user.is_system_admin:
+        raise HTTPException(403, "实体识别模式仅管理员可设置")
+    validate_library_rules(payload.model_dump())
     library = Library(**payload.model_dump())
     session.add(library)
     await session.flush()
     await log(session, "create", "library", library.id)
     await commit(session, "知识库编码已存在")
+    await session.refresh(library)
     return library
 
 
 @router.patch("/libraries/{library_id}", response_model=LibraryOut)
-async def update_library(library_id: int, payload: LibraryUpdate, session: AsyncSession = Depends(get_db)):
+async def update_library(
+    library_id: int,
+    payload: LibraryUpdate,
+    session: AsyncSession = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    if payload.entity_recognition_mode is not None and payload.entity_recognition_mode != "disabled" and not current_user.is_system_admin:
+        raise HTTPException(403, "实体识别模式仅管理员可设置")
     library = await get_or_404(session, Library, library_id, "知识库")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    values = payload.model_dump(exclude_unset=True)
+    validate_library_rules({"entity_recognition_mode": library.entity_recognition_mode, **values})
+    for field, value in values.items():
         setattr(library, field, value)
     await log(session, "update", "library", library.id)
     await commit(session, "更新知识库失败")
@@ -379,9 +438,12 @@ async def update_library(library_id: int, payload: LibraryUpdate, session: Async
 
 
 @router.delete("/libraries/{library_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_library(library_id: int, session: AsyncSession = Depends(get_db)):
+async def delete_library(library_id: int, session: AsyncSession = Depends(get_db), current_user: AuthenticatedUser = Depends(get_current_user)):
     library = await get_or_404(session, Library, library_id, "知识库")
+    if library.document_count > 0:
+        raise HTTPException(400, "知识库仍包含文档，不能删除")
     library.deleted_at = datetime.now()
+    library.deleted_by = current_user.id
     await log(session, "delete", "library", library.id)
     await commit(session, "删除知识库失败")
 
@@ -390,6 +452,7 @@ async def delete_library(library_id: int, session: AsyncSession = Depends(get_db
 async def restore_library(library_id: int, session: AsyncSession = Depends(get_db)):
     library = await get_or_404(session, Library, library_id, "知识库")
     library.deleted_at = None
+    library.deleted_by = None
     await log(session, "restore", "library", library.id)
     await commit(session, "恢复知识库失败")
     await session.refresh(library)
@@ -459,6 +522,8 @@ async def create_document(payload: DocumentCreate, session: AsyncSession = Depen
     library = await get_or_404(session, Library, payload.library_id, "知识库")
     if library.deleted_at is not None or library.status != "active":
         raise HTTPException(400, "知识库已删除或停用")
+    if library.max_document_count is not None and library.document_count >= library.max_document_count:
+        raise HTTPException(400, "已达到知识库文档数量上限")
     document = Document(**payload.model_dump())
     session.add(document)
     library.document_count += 1
@@ -468,32 +533,96 @@ async def create_document(payload: DocumentCreate, session: AsyncSession = Depen
     return document_out(document, library_name=library.name)
 
 
-@router.post("/documents/upload", response_model=DocumentUploadOut, status_code=status.HTTP_201_CREATED)
+@router.post("/documents/upload", response_model=list[DocumentUploadOut], status_code=status.HTTP_201_CREATED)
 async def upload_document(
-    library_id: int, file: UploadFile = File(...), uploaded_by: int | None = None,
+    library_id: int = Form(...), files: list[UploadFile] = File(...),
     session: AsyncSession = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_user),
 ):
+    """Validate a batch of documents, then create durable import tasks in one transaction."""
     library = await get_or_404(session, Library, library_id, "知识库")
     if library.deleted_at is not None or library.status != "active":
         raise HTTPException(400, "知识库已删除或停用")
-    raw = await file.read()
-    filename = Path(file.filename or "upload").name
+    if library.entity_recognition_mode != "disabled" and not current_user.is_system_admin:
+        raise HTTPException(403, "当前知识库模式暂不支持导入，请联系管理员修改")
+    if not files:
+        raise HTTPException(400, "请至少选择一个文件")
+    if library.max_upload_file_count is not None and len(files) > library.max_upload_file_count:
+        raise HTTPException(400, f"单次最多上传 {library.max_upload_file_count} 个文件")
+    if library.max_document_count is not None and library.document_count + len(files) > library.max_document_count:
+        raise HTTPException(400, "已达到知识库文档数量上限")
+
+    allowed_extensions = ALLOWED_DOCUMENT_EXTENSIONS
+    if library.allowed_file_types:
+        allowed_extensions = frozenset(f".{file_type.lower().lstrip('.')}" for file_type in library.allowed_file_types)
+    prepared_files: list[tuple[str, UploadFile, bytes, str]] = []
+    batch_hashes: set[str] = set()
+    for file in files:
+        filename = Path(file.filename or "upload").name
+        extension = Path(filename).suffix.lower()
+        if extension not in allowed_extensions:
+            raise HTTPException(400, f"文件 {filename} 不符合知识库允许的文件类型")
+        raw = await file.read()
+        if library.max_file_size_mb is not None and len(raw) > library.max_file_size_mb * 1024 * 1024:
+            raise HTTPException(400, f"文件 {filename} 大小不能超过 {library.max_file_size_mb} MB")
+        file_hash = hashlib.sha256(raw).hexdigest()
+        if file_hash in batch_hashes:
+            raise HTTPException(409, f"本次上传包含重复文件：{filename}")
+        batch_hashes.add(file_hash)
+        prepared_files.append((filename, file, raw, file_hash))
+
+    duplicate = await session.scalar(
+        select(Document.id).where(
+            Document.library_id == library_id,
+            Document.file_hash.in_(batch_hashes),
+            Document.deleted_at.is_(None),
+        )
+    )
+    if duplicate is not None:
+        raise HTTPException(409, "本次上传包含知识库内已存在的文件")
     directory = Path("storage") / "uploads" / str(library_id)
     directory.mkdir(parents=True, exist_ok=True)
-    stored = directory / f"{uuid4().hex}_{filename}"
-    stored.write_bytes(raw)
-    document = Document(
-        library_id=library_id, title=Path(filename).stem or filename, original_filename=filename,
-        storage_key=stored.as_posix(), mime_type=file.content_type, file_size=len(raw),
-        file_hash=hashlib.sha256(raw).hexdigest(), uploaded_by=uploaded_by,
-    )
-    session.add(document)
-    library.document_count += 1
-    await session.flush()
-    await log(session, "upload", "document", document.id)
+    uploaded_documents: list[DocumentUploadOut] = []
+    config_snapshot = {
+        "entity_recognition_mode": library.entity_recognition_mode,
+        "allowed_file_types": library.allowed_file_types or ["pdf", "md"],
+        "max_file_size_mb": library.max_file_size_mb,
+        "max_upload_file_count": library.max_upload_file_count,
+        "chunking_config": library.chunking_config,
+    }
+    for filename, file, raw, file_hash in prepared_files:
+        stored = directory / f"{uuid4().hex}_{filename}"
+        stored.write_bytes(raw)
+        document = Document(library_id=library_id, title=Path(filename).stem or filename, original_filename=filename, storage_key=stored.as_posix(), mime_type=file.content_type, file_size=len(raw), file_hash=file_hash, uploaded_by=current_user.id)
+        session.add(document)
+        library.document_count += 1
+        await session.flush()
+        # MySQL 的 created_at / updated_at 由服务端默认值生成；异步会话中先刷新，
+        # 避免构建响应时延迟读取字段而触发 MissingGreenlet。
+        await session.refresh(document)
+        task = ImportTask(library_id=library_id, document_id=document.id, status="queued", current_step="queued", progress=0, config_snapshot=config_snapshot, created_by=current_user.id)
+        session.add(task)
+        await session.flush()
+        await log(session, "upload", "document", document.id, {"import_task_id": task.id})
+        await log(session, "queue", "import_task", task.id, {"document_id": document.id})
+        uploaded_documents.append(DocumentUploadOut(**document_out(document, library_name=library.name), task_id=task.id))
     await commit(session, "上传文档失败")
-    return document_out(document, library_name=library.name)
-
+    for uploaded_document in uploaded_documents:
+        try:
+            await enqueue_import_task(uploaded_document.task_id)
+        except Exception as error:
+            logging.getLogger(__name__).error(
+                "导入任务入队失败：task_id=%s error=%s",
+                uploaded_document.task_id,
+                error,
+                exc_info=True,
+            )
+            failed_queue_task = await session.get(ImportTask, uploaded_document.task_id)
+            if failed_queue_task is not None:
+                failed_queue_task.current_step = "queue_pending"
+                failed_queue_task.error_message = f"Redis 入队失败：{error}"[:65535]
+            await commit(session, "记录导入队列状态失败")
+    return uploaded_documents
 
 @router.get("/documents/{document_id}", response_model=DocumentDetailOut)
 async def get_document(document_id: int, session: AsyncSession = Depends(get_db)):
@@ -515,13 +644,60 @@ async def update_document(document_id: int, payload: DocumentUpdate, session: As
                         tags=await document_tags(session, document.id), library_name=library.name)
 
 
+def delete_document_vectors(knowledge_base_id: int, document_id: int, *, milvus_client=None) -> None:
+    """Delete all v2 vectors belonging to one document without touching other knowledge bases."""
+    client = milvus_client or get_milvus_client()
+    collection_name = milvus_config.document_chunks_v2_collection
+    if not client.has_collection(collection_name=collection_name):
+        logging.getLogger(__name__).info(
+            "Milvus v2 collection is absent; vector cleanup skipped: collection=%s document_id=%s",
+            collection_name,
+            document_id,
+        )
+        return
+    filter_expression = f"knowledge_base_id == {knowledge_base_id} and document_id == {document_id}"
+    client.delete(collection_name=collection_name, filter=filter_expression)
+    logging.getLogger(__name__).info(
+        "Milvus document vectors deleted: collection=%s knowledge_base_id=%s document_id=%s",
+        collection_name,
+        knowledge_base_id,
+        document_id,
+    )
+
+
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_document(document_id: int, session: AsyncSession = Depends(get_db)):
+async def delete_document(document_id: int, session: AsyncSession = Depends(get_db), current_user: AuthenticatedUser = Depends(get_current_user)):
+    """Remove document vectors and dependent records before soft-deleting the document itself."""
     document = await get_or_404(session, Document, document_id, "文档")
+    active_task_id = await session.scalar(
+        select(ImportTask.id).where(
+            ImportTask.document_id == document_id,
+            ImportTask.status.in_(("queued", "processing")),
+        ).limit(1)
+    )
+    if active_task_id is not None:
+        raise HTTPException(400, "文档仍有正在排队或处理中的导入任务，请先取消任务后再删除文档")
+
+    try:
+        delete_document_vectors(document.library_id, document.id)
+    except Exception as error:
+        logging.getLogger(__name__).error(
+            "Milvus document vector cleanup failed: knowledge_base_id=%s document_id=%s error=%s",
+            document.library_id,
+            document.id,
+            error,
+            exc_info=True,
+        )
+        raise HTTPException(503, "Milvus 向量删除失败，文档未删除，请稍后重试") from error
+
     if document.deleted_at is None:
         library = await get_or_404(session, Library, document.library_id, "知识库")
         library.document_count = max(0, library.document_count - 1)
+    await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
+    await session.execute(delete(ImportTask).where(ImportTask.document_id == document_id))
     document.deleted_at = datetime.now()
+    document.deleted_by = current_user.id
+    document.status = "deleted"
     await log(session, "delete", "document", document.id)
     await commit(session, "删除文档失败")
 
@@ -555,6 +731,83 @@ async def replace_document_tags(document_id: int, payload: DocumentTagsUpdate, s
     return document_out(document, chunk_count=await document_chunk_count(session, document.id),
                         tags=names, library_name=library.name)
 
+
+
+def import_task_out(task: ImportTask) -> dict:
+    """Serialize an import task with its related document and library labels."""
+    return {
+        "id": task.id, "library_id": task.library_id, "document_id": task.document_id,
+        "status": task.status, "current_step": task.current_step, "progress": task.progress,
+        "config_snapshot": task.config_snapshot, "entity_result": task.entity_result,
+        "chunk_count": task.chunk_count, "error_message": task.error_message,
+        "created_by": task.created_by, "created_at": task.created_at, "updated_at": task.updated_at,
+        "started_at": task.started_at, "finished_at": task.finished_at,
+        "document_title": task.document.title if task.document else None,
+        "library_name": task.library.name if task.library else None,
+    }
+
+@router.get("/import-tasks", response_model=list[ImportTaskOut])
+async def list_import_tasks(
+    library_id: int | None = Query(None),
+    task_status: str | None = Query(None),
+    import_date: date | None = Query(None),
+    session: AsyncSession = Depends(get_db),
+):
+    """List durable import tasks, optionally scoped to a library, status, and creation date."""
+    statement = select(ImportTask).options(selectinload(ImportTask.document), selectinload(ImportTask.library)).order_by(ImportTask.id.desc())
+    if library_id is not None: statement = statement.where(ImportTask.library_id == library_id)
+    if task_status is not None:
+        if task_status not in IMPORT_TASK_STATUSES: raise HTTPException(400, "无效的导入任务状态")
+        statement = statement.where(ImportTask.status == task_status)
+    if import_date is not None:
+        day_start = datetime.combine(import_date, time.min)
+        day_end = day_start + timedelta(days=1)
+        statement = statement.where(ImportTask.created_at >= day_start, ImportTask.created_at < day_end)
+    tasks = (await session.execute(statement)).scalars().all()
+    return [import_task_out(task) for task in tasks]
+
+@router.get("/import-tasks/{task_id}", response_model=ImportTaskOut)
+async def get_import_task(task_id: int, session: AsyncSession = Depends(get_db)):
+    task = await session.scalar(select(ImportTask).options(selectinload(ImportTask.document), selectinload(ImportTask.library)).where(ImportTask.id == task_id))
+    if task is None: raise HTTPException(404, "导入任务不存在")
+    return import_task_out(task)
+
+@router.post("/import-tasks/{task_id}/retry", response_model=ImportTaskOut)
+async def retry_import_task(task_id: int, session: AsyncSession = Depends(get_db)):
+    task = await session.scalar(select(ImportTask).options(selectinload(ImportTask.document), selectinload(ImportTask.library)).where(ImportTask.id == task_id))
+    if task is None: raise HTTPException(404, "导入任务不存在")
+    if task.status != "failed": raise HTTPException(400, "只有失败任务可以重试")
+    task.status = "queued"; task.current_step = "queued"; task.progress = 0; task.error_message = None; task.started_at = None; task.finished_at = None
+    task.document.status = "uploaded"
+    await log(session, "retry", "import_task", task.id, {"document_id": task.document_id})
+    await commit(session, "重试导入任务失败")
+    await enqueue_import_task(task.id)
+    return import_task_out(task)
+
+@router.post("/import-tasks/{task_id}/cancel", response_model=ImportTaskOut)
+async def cancel_import_task(task_id: int, session: AsyncSession = Depends(get_db)):
+    task = await session.scalar(select(ImportTask).options(selectinload(ImportTask.document), selectinload(ImportTask.library)).where(ImportTask.id == task_id))
+    if task is None: raise HTTPException(404, "导入任务不存在")
+    if task.status not in {"queued", "processing"}: raise HTTPException(400, "当前任务不能取消")
+    await request_import_cancellation(task.id)
+    task.status = "cancelled"; task.current_step = "cancelled"; task.finished_at = datetime.now()
+    task.document.status = "uploaded"; task.document.parse_error = "导入任务已取消"
+    await log(session, "cancel", "import_task", task.id, {"document_id": task.document_id})
+    await commit(session, "取消导入任务失败")
+    return import_task_out(task)
+
+
+@router.delete("/import-tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_import_task(task_id: int, session: AsyncSession = Depends(get_db)):
+    """Delete a terminal task record without deleting its document or imported chunks."""
+    task = await session.get(ImportTask, task_id)
+    if task is None:
+        raise HTTPException(404, "导入任务不存在")
+    if task.status in {"queued", "processing"}:
+        raise HTTPException(400, "请先取消正在排队或处理中的导入任务")
+    await log(session, "delete", "import_task", task.id, {"document_id": task.document_id})
+    await session.delete(task)
+    await commit(session, "删除导入任务失败")
 
 @router.get("/tags", response_model=list[TagOut])
 async def list_tags(session: AsyncSession = Depends(get_db)):

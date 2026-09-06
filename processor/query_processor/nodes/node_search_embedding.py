@@ -1,94 +1,106 @@
-# processor/query_processor/nodes/node_search_embedding.py
+"""按知识库隔离的本地 Milvus 混合检索节点。"""
+
+from __future__ import annotations
+
+from typing import Any
+
 from config.milvus_config import milvus_config
-from processor.query_processor.base import NodeBase, T
+from processor.query_processor.base import NodeBase
 from processor.query_processor.state import QueryGraphState
 from tool.logger import logger
 from utils.embedding_utils import generate_embeddings
-from utils.json_format_utils import serialize_json
 from utils.milvus_utils import create_hybrid_search_requests, get_milvus_client, hybrid_search
 
 
 class NodeSearchEmbedding(NodeBase):
-     """
-    节点功能：基于已确认主体名+改写后的用户问题，执行Milvus向量数据库混合检索
-    """
+    """使用 BGE-M3 对当前知识库执行 Dense/Sparse 混合检索。"""
 
-     # 覆盖基类的 name 属性，标识节点名称
-     name: str = "node_search_embedding"
+    name = "node_search_embedding"
 
-     def process(self, state: QueryGraphState) -> QueryGraphState:
-         """
-         核心节点函数：基于已确认商品名+改写后的用户问题，执行Milvus向量数据库混合检索
-         流程：用户问题向量化 → 构造带商品名过滤的混合搜索请求 → 执行稠密+稀疏混合检索 → 返回检索结果
-         :param state: Dict - 会话状态字典，包含上游传递的核心信息，关键字段：
-                       {
-                           "rewritten_query": str,   # step4改写后的完整用户问题（含商品名）
-                           "item_names": list[str],  # step7已确认的标准化商品名列表
-                       }
+    def process(self, state: QueryGraphState) -> QueryGraphState:
+        query = str(state.get("rewritten_query") or state.get("original_query") or "").strip()
+        library_id = state.get("library_id")
+        if not query:
+            state["embedding_chunks"] = []
+            return state
+        if not isinstance(library_id, int) or library_id <= 0:
+            raise ValueError("本地检索需要有效的 library_id")
 
-         :return: Dict - 检索结果字典，仅包含embedding_chunks字段，供下游节点使用：
-                  {
-                      "embedding_chunks": List[Dict]  # Milvus检索结果列表，无结果则为空列表
-                                                      # 每个元素为一条匹配的向量数据，含业务字段
-                  }
-         """
+        embeddings = generate_embeddings([query])
+        dense_vector = embeddings["dense"][0]
+        sparse_vector = embeddings["sparse"][0]
+        collection_name = milvus_config.document_chunks_v2_collection
+        client = get_milvus_client()
+        if not client.has_collection(collection_name=collection_name):
+            logger.warning("Milvus 检索集合不存在：%s", collection_name)
+            state["embedding_chunks"] = []
+            return state
+        field_names = self._get_collection_field_names(client, collection_name)
+        if "knowledge_base_id" not in field_names:
+            raise ValueError(f"检索集合缺少 knowledge_base_id 字段：{collection_name}")
+        expression = f"knowledge_base_id == {library_id}"
+        output_fields = [
+            field for field in self.OUTPUT_FIELDS
+            if field in field_names
+        ]
+        requests = create_hybrid_search_requests(
+            dense_vector=dense_vector,
+            sparse_vector=sparse_vector,
+            expr=expression,
+            limit=max(int(state.get("retrieval_top_k") or 20), 10),
+        )
+        result = hybrid_search(
+            client=client,
+            collection_name=collection_name,
+            reqs=requests,
+            ranker_weights=(0.8, 0.2),
+            limit=max(int(state.get("retrieval_top_k") or 20), 10),
+            output_fields=output_fields,
+        )
+        state["embedding_chunks"] = self._normalize_results(result)
+        logger.info("知识库 %s 本地检索完成，命中 %s 个 Chunk", library_id, len(state["embedding_chunks"]))
+        return state
 
-         try:
+    OUTPUT_FIELDS = (
+        "chunk_id", "knowledge_base_id", "document_id", "document_version",
+        "chunk_index", "content", "title", "parent_title", "file_name",
+        "file_title", "source_page", "item_name", "entity_recognition_mode",
+        "chunk_type", "source_kind", "image_sources", "image_metadata",
+    )
 
-             # 1、用户问题和已确认商品名
-             query = state.get("rewritten_query")
-             item_names = state.get("item_names")
+    @staticmethod
+    def _get_collection_field_names(client: Any, collection_name: str) -> set[str]:
+        description = client.describe_collection(collection_name=collection_name)
+        if isinstance(description, dict):
+            schema = description.get("schema")
+            fields = schema.get("fields", []) if isinstance(schema, dict) else description.get("fields", [])
+        else:
+            schema = getattr(description, "schema", None)
+            fields = getattr(schema, "fields", None) or getattr(description, "fields", [])
+        names: set[str] = set()
+        for field in fields or []:
+            name = field.get("name") if isinstance(field, dict) else getattr(field, "name", None)
+            if name:
+                names.add(str(name))
+        return names
 
-             # 2、生成向量 (Dense + Sparse)
-             embeddings = generate_embeddings([query])
-             dense_vec = embeddings.get("dense")[0]
-             sparse_vec = embeddings.get("sparse")[0]
-
-             # 3. 获取Milvus的集合
-             collection_name = milvus_config.chunks_collection
-
-             # 4、处理 item_names 中的引号，防止注入或语法错误
-             expr = None
-             # quoted = ", ".join(f'"{v}"' for v in item_names)
-             # expr = f"item_name in [{quoted}]"
-             # 'item_name in ["BrotherHAK-180烫金机","BrotherHAK180烫金机"]'
-             if item_names:
-                 expr = f'item_name in {item_names}'
-                 logger.info(f"过滤条件: {expr}")
-             else:
-                 logger.info("未指定商品名过滤，将全库检索")
-
-             # 5、构造Milvus混合搜索请求对象
-             reqs = create_hybrid_search_requests(
-                 dense_vector=dense_vec,
-                 sparse_vector=sparse_vec,
-                 expr=expr,
-                 limit=10  # 底层检索返回数量（后续会再过滤为5，预留更多结果做重排序）
-             )
-
-             # 6、执行混合向量检索
-             logger.info("开始执行 Milvus 混合检索...")
-             client = get_milvus_client()
-             res = hybrid_search(
-                 client=client,
-                 collection_name=collection_name,  # 检索的目标集合名（文本片段向量集合）
-                 reqs=reqs,  # 构造好的混合搜索请求对象（稠密+稀疏）
-                 ranker_weights=(0.8, 0.2),  # 稠/稀疏向量评分权重配比，各占50%（可按业务调优）
-                 output_fields=["chunk_id", "content", "item_name"]  # 指定返回的业务字段
-             )
-
-             # 7、构造并返回结果：若检索结果非空，取res[0]，否则返回空列表
-             return {"embedding_chunks": res[0] if res else []}
-
-         except Exception as e:
-             logger.exception(f"向量搜索失败: {e}")
-             return {}
-if __name__ == "__main__":
-
-    init_state = {
-        "rewritten_query": "关于brother HAK180烫金机，如何调节转印温度？",
-        "item_names": ["BrotherHAK180烫金机", "BrotherHAK-180烫金机"]
-    }
-    node_search_embedding = NodeSearchEmbedding()
-    result = node_search_embedding(init_state)
-    logger.info(serialize_json(result, indent=4))
+    @staticmethod
+    def _normalize_results(result: Any) -> list[dict[str, Any]]:
+        """兼容 MilvusClient 返回的 entity 嵌套和扁平两种结果格式。"""
+        if not result:
+            return []
+        hits = result[0] if isinstance(result, list) and result and isinstance(result[0], list) else result
+        normalized: list[dict[str, Any]] = []
+        for hit in hits or []:
+            if not isinstance(hit, dict):
+                continue
+            entity = hit.get("entity") if isinstance(hit.get("entity"), dict) else hit
+            item = dict(entity)
+            if "chunk_id" not in item and hit.get("id") is not None:
+                item["chunk_id"] = hit["id"]
+            if hit.get("distance") is not None:
+                item["vector_score"] = float(hit["distance"])
+            item.setdefault("source", "local")
+            if item.get("chunk_id") is not None:
+                normalized.append(item)
+        return normalized

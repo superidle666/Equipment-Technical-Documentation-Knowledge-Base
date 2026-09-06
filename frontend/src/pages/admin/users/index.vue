@@ -6,9 +6,11 @@
  * @BusinessRule: 系统管理员不可编辑或停用
  -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { AddIcon, ChevronDownIcon, SearchIcon } from 'tdesign-icons-vue-next'
+import { computed, onMounted, ref, watch } from 'vue'
+import { AddIcon, SearchIcon } from 'tdesign-icons-vue-next'
 import { mysqlApi, type Role } from '../../../api/mysql'
+import { isEmail, isPhone } from '../../../utils/validate'
+import { PAGINATION } from '../../../constants'
 import {
   isSystemAdminUser,
   mapUser,
@@ -48,6 +50,8 @@ const showEditDialog = ref(false)
 const editingUserId = ref<number>()
 const newUser = ref<UserForm>(createUserForm())
 const editUser = ref<UserEditForm>(createEditUserForm())
+const tablePage = ref(1)
+const tablePageSize = ref<number>(PAGINATION.PAGE_SIZE)
 
 const columns = [
   { colKey: 'name', title: '用户' },
@@ -83,6 +87,22 @@ const filteredUsers = computed(() => {
   })
 })
 
+const tablePagination = computed(() => ({
+  current: tablePage.value,
+  pageSize: tablePageSize.value,
+  total: filteredUsers.value.length,
+  pageSizeOptions: [...PAGINATION.PAGE_SIZES],
+}))
+
+function handlePageChange(pageInfo: { current: number; pageSize: number }) {
+  tablePage.value = pageInfo.current
+  tablePageSize.value = pageInfo.pageSize
+}
+
+watch(search, () => {
+  tablePage.value = 1
+})
+
 /** 创建新增用户表单的默认值。 */
 function createUserForm(): UserForm {
   return {
@@ -114,12 +134,11 @@ function openCreateDialog() {
   showCreateDialog.value = true
 }
 
-const PHONE_PATTERN = /^1[3-9]\d{9}$/
 
 /** 校验 11 位中国大陆手机号。 */
 function validatePhone(phone: string) {
   if (!phone.trim()) return '请输入手机号。'
-  if (!PHONE_PATTERN.test(phone.trim())) {
+  if (!isPhone(phone)) {
     return '请输入正确的 11 位中国大陆手机号。'
   }
   return ''
@@ -127,23 +146,40 @@ function validatePhone(phone: string) {
 
 /** 检查新增用户的账号、手机号和必填字段。 */
 function validateNewUser() {
+  if (!newUser.value || typeof newUser.value !== 'object') return '用户表单数据无效，请重新打开表单。'
+  if (typeof newUser.value.username !== 'string') return '登录账号必须是文本。'
+  if (typeof newUser.value.display_name !== 'string') return '显示名称必须是文本。'
+  if (typeof newUser.value.email !== 'string') return '邮箱必须是文本。'
+  if (typeof newUser.value.phone !== 'string') return '手机号必须是文本。'
   const username = newUser.value.username.trim()
   if (!username) return '请输入登录账号。'
   if (!/^[A-Za-z]{3,20}$/.test(username)) {
     return '登录账号只能使用 3 至 20 个英文字母，不能包含数字、中文或特殊字符。'
   }
   if (!newUser.value.display_name.trim()) return '请输入显示名称。'
+  if (newUser.value.email.trim() && !isEmail(newUser.value.email)) return '请输入正确的邮箱地址。'
+  if (!Array.isArray(newUser.value.role_codes) || !newUser.value.role_codes.length) return '请至少选择一个角色。'
   return validatePhone(newUser.value.phone)
 }
 
 /** 检查编辑用户的登录账号、显示名称和可选手机号。 */
 function validateEditUser() {
+  if (!editUser.value || typeof editUser.value !== 'object') return '用户表单数据无效，请重新打开表单。'
+  if (typeof editUser.value.username !== 'string') return '登录账号必须是文本。'
+  if (typeof editUser.value.display_name !== 'string') return '显示名称必须是文本。'
+  if (typeof editUser.value.email !== 'string') return '邮箱必须是文本。'
+  if (typeof editUser.value.phone !== 'string') return '手机号必须是文本。'
+  if (typeof editUser.value.password !== 'string') return '重置密码必须是文本。'
   const username = editUser.value.username.trim()
   if (!username) return '请输入登录账号。'
   if (!/^[A-Za-z]{3,20}$/.test(username)) {
     return '登录账号只能使用 3 至 20 个英文字母，不能包含数字、中文或特殊字符。'
   }
   if (!editUser.value.display_name.trim()) return '请输入显示名称。'
+  if (editUser.value.email.trim() && !isEmail(editUser.value.email)) return '请输入正确的邮箱地址。'
+  if (!Array.isArray(editUser.value.role_codes) || !editUser.value.role_codes.length) return '请至少选择一个角色。'
+  if (!['active', 'disabled', 'locked'].includes(editUser.value.status)) return '请选择有效的用户状态。'
+  if (editUser.value.password && editUser.value.password.length < 6) return '重置密码至少需要 6 个字符。'
   return editUser.value.phone.trim() ? validatePhone(editUser.value.phone) : ''
 }
 
@@ -163,7 +199,7 @@ async function loadUsers() {
       mysqlApi.listRoles(),
     ])
 
-    users.value = userData.map(mapUser)
+    users.value = userData.map(mapUser).sort((left, right) => Number(isSystemAdminUser(right)) - Number(isSystemAdminUser(left)))
     roles.value = roleData
     emit('update-counts', {
       users: users.value.length,
@@ -309,14 +345,11 @@ onMounted(() => {
           <SearchIcon />
         </template>
       </t-input>
-      <t-button variant="outline">
-        筛选
-        <ChevronDownIcon />
-      </t-button>
+
     </div>
 
     <div class="panel table-panel">
-      <t-table :data="filteredUsers" :columns="columns" row-key="id">
+      <t-table :data="filteredUsers" :columns="columns" row-key="id" :pagination="tablePagination" @page-change="handlePageChange">
         <template #name="{ row }">
           <div class="user-cell">
             <div class="avatar tiny">{{ row.name.slice(0, 1) }}</div>
@@ -364,7 +397,8 @@ onMounted(() => {
           </template>
           <span v-else class="protected-label">系统内置</span>
         </template>
-      </t-table>
+              <template #totalContent><span class="table-pagination-total">共 {{ filteredUsers.length }} 条数据</span></template>
+</t-table>
     </div>
 
     <t-dialog
@@ -434,3 +468,9 @@ onMounted(() => {
     </t-dialog>
   </section>
 </template>
+
+<style scoped>
+.user-cell { display: flex; align-items: center; gap: 8px; }
+.user-cell strong { font-size: 12px; }
+.protected-label { display: inline-flex; align-items: center; min-height: 28px; color: #9ca3af; font-size: 11px; font-weight: 400; line-height: 1.4; white-space: nowrap; }
+</style>

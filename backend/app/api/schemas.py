@@ -6,9 +6,31 @@ MySQL 数据管理接口的数据校验模型。
 """
 
 from datetime import datetime
+from math import ceil, isfinite
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def normalize_file_size_limit(value: object) -> object:
+    """按整数 MB 保存文件大小限制，小数统一向上取整。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("单文件大小上限必须是数字")
+    try:
+        size = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("单文件大小上限必须是数字") from exc
+    if not isfinite(size):
+        raise ValueError("单文件大小上限必须是有效数字")
+    rounded_size = ceil(size)
+    if rounded_size < 1:
+        raise ValueError("单文件大小上限至少为 1 MB")
+    if rounded_size > 10240:
+        raise ValueError("单文件大小上限不能超过 10240 MB")
+    return rounded_size
 
 
 class UserCreate(BaseModel):
@@ -20,7 +42,7 @@ class UserCreate(BaseModel):
         description="3 至 20 位英文字母登录账号",
     )
     display_name: str = Field(min_length=1, max_length=100, description="用户显示名称")
-    email: str | None = Field(default=None, description="邮箱，可选且必须唯一")
+    email: str | None = Field(default=None, max_length=255, description="邮箱，可选且必须唯一")
     phone: str = Field(min_length=11, max_length=11, pattern=r"^1[3-9]\d{9}$", description="中国大陆 11 位手机号，必填且必须唯一")
     role_codes: list[str] = Field(default_factory=lambda: ["user"], description="角色编码列表")
 
@@ -35,6 +57,18 @@ class UserCreate(BaseModel):
             raise ValueError("手机号不能为空")
         return phone
 
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_email(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        email = value.strip()
+        if not email:
+            return None
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+            raise ValueError("请输入正确的邮箱地址")
+        return email
+
 
 class UserUpdate(BaseModel):
     """更新用户请求模型；未提交的字段不会覆盖原值。"""
@@ -46,7 +80,7 @@ class UserUpdate(BaseModel):
         description="3 至 20 位英文字母登录账号",
     )
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
-    email: str | None = None
+    email: str | None = Field(default=None, max_length=255)
     phone: str | None = Field(default=None, min_length=11, max_length=11, pattern=r"^1[3-9]\d{9}$", description="中国大陆 11 位手机号")
     status: str | None = Field(default=None, pattern="^(active|disabled|locked)$")
     password: str | None = Field(default=None, min_length=6, max_length=128)
@@ -60,6 +94,18 @@ class UserUpdate(BaseModel):
             return value
         phone = value.strip()
         return phone or None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_email(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        email = value.strip()
+        if not email:
+            return None
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+            raise ValueError("请输入正确的邮箱地址")
+        return email
 
 
 class UserOut(BaseModel):
@@ -131,6 +177,19 @@ class LibraryCreate(BaseModel):
     cover_color: str | None = Field(default=None, max_length=20)
 
 
+    entity_recognition_mode: str = Field(default="disabled", pattern="^(disabled|optional|required)$")
+    allowed_file_types: list[str] | None = None
+    max_file_size_mb: int | None = Field(default=None, ge=1, le=10240)
+    max_document_count: int | None = Field(default=None, ge=1)
+    max_upload_file_count: int | None = Field(default=None, ge=1)
+    chunking_config: dict[str, Any] | None = None
+    visibility: str = Field(default="private", pattern="^(private|shared)$")
+
+    @field_validator("max_file_size_mb", mode="before")
+    @classmethod
+    def normalize_max_file_size_mb(cls, value: object) -> object:
+        return normalize_file_size_limit(value)
+
 class LibraryUpdate(BaseModel):
     """更新知识库信息或启用状态的请求模型。"""
     name: str | None = Field(default=None, min_length=1, max_length=150)
@@ -138,6 +197,19 @@ class LibraryUpdate(BaseModel):
     cover_color: str | None = Field(default=None, max_length=20)
     status: str | None = Field(default=None, pattern="^(active|disabled)$")
 
+
+    entity_recognition_mode: str | None = Field(default=None, pattern="^(disabled|optional|required)$")
+    allowed_file_types: list[str] | None = None
+    max_file_size_mb: int | None = Field(default=None, ge=1, le=10240)
+    max_document_count: int | None = Field(default=None, ge=1)
+    max_upload_file_count: int | None = Field(default=None, ge=1)
+    chunking_config: dict[str, Any] | None = None
+    visibility: str | None = Field(default=None, pattern="^(private|shared)$")
+
+    @field_validator("max_file_size_mb", mode="before")
+    @classmethod
+    def normalize_max_file_size_mb(cls, value: object) -> object:
+        return normalize_file_size_limit(value)
 
 class LibraryOut(BaseModel):
     """知识库返回模型，document_count 为当前有效文档数量。"""
@@ -148,6 +220,13 @@ class LibraryOut(BaseModel):
     description: str | None
     cover_color: str | None
     status: str
+    entity_recognition_mode: str
+    allowed_file_types: list[str] | None
+    max_file_size_mb: int | None
+    max_document_count: int | None
+    max_upload_file_count: int | None
+    chunking_config: dict[str, Any] | None
+    visibility: str
     document_count: int
     created_by: int | None
     created_at: datetime
@@ -180,14 +259,14 @@ class DocumentCreate(BaseModel):
     file_size: int | None = Field(default=None, ge=0)
     file_hash: str | None = Field(default=None, max_length=128)
     version: int = Field(default=1, ge=1)
-    status: str = Field(default="uploaded", pattern="^(uploaded|processing|published|failed|archived)$")
+    status: str = Field(default="uploaded", pattern="^(uploaded|processing|ready|failed|deleted)$")
     uploaded_by: int | None = None
 
 
 class DocumentUpdate(BaseModel):
     """更新文档标题、状态或解析错误的请求模型。"""
     title: str | None = Field(default=None, min_length=1, max_length=255)
-    status: str | None = Field(default=None, pattern="^(uploaded|processing|published|failed|archived)$")
+    status: str | None = Field(default=None, pattern="^(uploaded|processing|ready|failed|deleted)$")
     parse_error: str | None = None
 
 
@@ -207,6 +286,7 @@ class DocumentOut(BaseModel):
     parse_error: str | None
     uploaded_by: int | None
     published_at: datetime | None
+    deleted_by: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -224,8 +304,114 @@ class DocumentDetailOut(DocumentListOut):
 
 class DocumentUploadOut(DocumentListOut):
     """本地上传成功后的文档元数据。"""
+    task_id: int | None = None
 
 
+class QueryRequest(BaseModel):
+    """用户端知识库查询请求。"""
+
+    library_id: int = Field(ge=1)
+    query: str = Field(min_length=1, max_length=4000)
+    session_id: str | None = Field(default=None, max_length=128)
+    top_k: int = Field(default=5, ge=1, le=10)
+    use_hyde: bool = False
+    use_web_search: bool = False
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("查询内容不能为空")
+        return normalized
+
+
+class QuerySourceOut(BaseModel):
+    """用户端展示的单条知识库来源。"""
+
+    chunk_id: str | int | None = None
+    document_id: int | None = None
+    document_title: str | None = None
+    chunk_index: int | None = None
+    page_number: int | None = None
+    section_title: str | None = None
+    parent_title: str | None = None
+    content: str = ""
+    score: float | None = None
+    source: str = "local"
+
+
+class QueryLibraryOut(BaseModel):
+    """用户端可选择的知识库摘要。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    cover_color: str | None
+    status: str
+    document_count: int
+    updated_at: datetime
+
+
+class QueryResponse(BaseModel):
+    """知识库问答结果，包含答案和可追溯来源。"""
+
+    library_id: int
+    query: str
+    answer: str
+    sources: list[QuerySourceOut] = Field(default_factory=list)
+
+
+class QuerySessionOut(BaseModel):
+    """登录用户的已保存会话摘要。"""
+
+    id: str
+    library_id: int
+    title: str
+    created_at: float
+    updated_at: float
+
+
+class QueryChatMessageOut(BaseModel):
+    """用于恢复用户端历史会话的单条消息。"""
+
+    id: str
+    role: str
+    content: str
+    created_at: float
+    sources: list[QuerySourceOut] = Field(default_factory=list)
+
+
+class QuerySessionMessagesOut(BaseModel):
+    """单个会话的完整消息记录。"""
+
+    session_id: str
+    library_id: int
+    messages: list[QueryChatMessageOut] = Field(default_factory=list)
+
+
+
+class ImportTaskOut(BaseModel):
+    """文档导入任务状态返回模型。"""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    library_id: int
+    document_id: int
+    status: str
+    current_step: str | None
+    progress: int
+    config_snapshot: dict[str, Any] | None
+    entity_result: dict[str, Any] | None
+    chunk_count: int | None
+    error_message: str | None
+    created_by: int | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    document_title: str | None = None
+    library_name: str | None = None
 class ChunkCreate(BaseModel):
     """创建文档分段请求模型；vector_id 用于关联向量数据库记录。"""
     chunk_index: int = Field(ge=0)

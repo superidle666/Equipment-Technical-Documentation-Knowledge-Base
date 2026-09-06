@@ -1,4 +1,6 @@
 import type { Document, Library, User } from '../../../api/mysql'
+import { formatDate } from '../../../utils/date'
+import { formatFileSize } from '../../../utils/format'
 
 // 管理端列表展示模型：将后端字段转换为表格可读文本。
 
@@ -22,11 +24,13 @@ export type UserRow = User & {
 
 /** 文档状态到中文标签的映射。 */
 export const documentStatusLabels: Record<string, string> = {
-  published: '已发布',
+  ready: '可检索',
   processing: '处理中',
   failed: '失败',
-  archived: '已删除',
+  deleted: '已删除',
   uploaded: '待处理',
+  published: '可检索',
+  archived: '已删除',
 }
 
 /** 将文档生命周期状态转换为管理端中文显示文本。 */
@@ -41,40 +45,20 @@ const userStatusLabels: Record<string, string> = {
   locked: '已锁定',
 }
 
-/** 将 ISO 时间转换为中文短日期时间；空值显示占位符。 */
+/** 将 ISO 时间转换为管理端日期时间文本；空值显示占位符。 */
 export function formatTime(value: string | null | undefined, includeYear = false) {
-  if (!value) {
-    return '-'
-  }
-
-  return new Date(value).toLocaleString('zh-CN', {
-    ...(includeYear ? { year: 'numeric' as const } : {}),
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+  if (!value) return '-'
+  return formatDate(value, includeYear ? 'YYYY-MM-DD HH:mm' : 'MM-DD HH:mm')
 }
 
-/** 将字节数转换为 KB/MB 展示文本。 */
+/** 将字节数转换为统一文件大小文本。 */
 export function formatSize(value: number | null) {
-  if (value === null || value === undefined) {
-    return '-'
-  }
-
-  if (value > 1024 * 1024) {
-    return `${(value / 1024 / 1024).toFixed(1)} MB`
-  }
-
-  return `${Math.max(1, Math.round(value / 1024))} KB`
+  return formatFileSize(value)
 }
 
-/** 将字节数转换为统一的 MB 展示文本。 */
+/** 将字节数转换为统一文件大小文本。 */
 export function formatSizeInMb(value: number | null) {
-  if (value === null || value === undefined) {
-    return '-'
-  }
-  return `${(value / 1024 / 1024).toFixed(2)} MB`
+  return formatFileSize(value)
 }
 
 /** 将文档接口数据映射为管理端文档表格行。 */

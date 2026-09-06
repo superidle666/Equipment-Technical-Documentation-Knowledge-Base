@@ -56,7 +56,7 @@ class NodeAnswerOutput(NodeBase):
         image_urls = self._extract_images_from_docs(state.get("reranked_docs") or [])
 
         # 阶段五：把答案写入到mongodb的history中
-        if state.get("answer"):
+        if state.get("answer") and state.get("persist_history", True):
             logger.info("---写入MongoDB历史记录---")
             self._step_4_write_history(state, image_urls=image_urls)
 

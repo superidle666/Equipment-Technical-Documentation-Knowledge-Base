@@ -3,10 +3,11 @@
  * @Author: 项目维护者
  * @Date: 2026-09-02
  * @Description: 管理端入口，负责登录、会话恢复与后台模块切换。
- * @BusinessRule: 系统设置仅对 admin 角色可见；“记住我”仅在用户主动勾选后保存本机凭据。
+ * @BusinessRule: 系统设置仅对 admin 角色可见；“记住我”仅控制浏览器登录会话持久化。
 -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ChatIcon,
@@ -17,19 +18,21 @@ import {
   UserIcon,
   LockOnIcon,
 } from 'tdesign-icons-vue-next'
-import { currentUser, hasAccessToken, login as loginWithPassword, logout as logoutSession, type AuthUser } from '../../api/auth'
 import AdminHeader from '../../components/admin/AdminHeader.vue'
 import AdminSidebar from '../../components/admin/AdminSidebar.vue'
 import AdminLayout from '../../layouts/AdminLayout.vue'
 import DashboardPage from './dashboard/index.vue'
 import DocumentsPage from './documents/index.vue'
+import LibrariesPage from './libraries/index.vue'
 import PermissionsPage from './permissions/index.vue'
 import RolesPage from './roles/index.vue'
 import SessionsPage from './sessions/index.vue'
 import SettingsPage from './settings/index.vue'
 import UsersPage from './users/index.vue'
+import { USER_ROLE } from '../../constants'
+import { useUserStore } from '../../store/modules/user'
 
-type NavKey = 'dashboard' | 'documents' | 'users' | 'roles' | 'permissions' | 'sessions' | 'settings'
+type NavKey = 'dashboard' | 'libraries' | 'documents' | 'users' | 'roles' | 'permissions' | 'sessions' | 'settings'
 
 type AdminCounts = {
   documents: number
@@ -40,16 +43,18 @@ type AdminCounts = {
 
 const route = useRoute()
 const router = useRouter()
-const isAuthenticated = ref(hasAccessToken())
-const account = ref<AuthUser | null>(null)
+const userStore = useUserStore()
+const { userInfo: account, isLoggedIn: isAuthenticated } = storeToRefs(userStore)
 const username = ref('')
 const password = ref('')
 const loginError = ref('')
 const loginLoading = ref(false)
 const rememberLogin = ref(true)
-// NOTE: 退出登录只撤销令牌会话；已勾选“记住我”的本机凭据需要保留并在登录页回填。
-const REMEMBERED_CREDENTIALS_KEY = 'kb-admin-remembered-credentials'
 const activeNav = ref<NavKey>('dashboard')
+const selectedLibraryId = ref<number>()
+const documentFilterLibraryId = ref<number>()
+const uploadLibraryId = ref<number>()
+const uploadRequestId = ref(0)
 const collapsed = ref(false)
 const mobileOpen = ref(false)
 const userMenuExpanded = ref(true)
@@ -57,24 +62,23 @@ const counts = ref<AdminCounts>({ documents: 0, users: 0, roles: 0, permissions:
 
 const allNavItems = [
   { key: 'dashboard' as const, label: '仪表盘', icon: DashboardIcon },
+  { key: 'libraries' as const, label: '知识库管理', icon: FileIcon },
   { key: 'documents' as const, label: '文档管理', icon: FileIcon },
   { key: 'users' as const, label: '用户管理', icon: UsergroupIcon },
   { key: 'sessions' as const, label: '操作日志', icon: ChatIcon },
   { key: 'settings' as const, label: '系统设置', icon: SettingIcon },
 ]
 
-const navItems = computed(() => allNavItems.filter((item) => item.key !== 'settings' || account.value?.roles.includes('admin')))
+const navItems = computed(() => allNavItems.filter((item) => item.key !== 'settings' || account.value?.roles.includes(USER_ROLE.ADMIN)))
 
 const pageTitle = computed(() => navItems.value.find((item) => item.key === activeNav.value)?.label ?? '仪表盘')
-const roleLabel = computed(() => account.value?.roles.includes('admin') ? '系统管理员' : '已授权用户')
+const roleLabel = computed(() => account.value?.roles.includes(USER_ROLE.ADMIN) ? '系统管理员' : '已授权用户')
 
 async function loadCurrentUser() {
   try {
-    account.value = await currentUser()
-    isAuthenticated.value = true
+    await userStore.fetchUserInfo()
   } catch {
-    isAuthenticated.value = false
-    account.value = null
+    userStore.clearToken()
     await router.replace({ name: 'admin-login' })
   }
 }
@@ -88,16 +92,7 @@ async function login() {
   }
   loginLoading.value = true
   try {
-    account.value = await loginWithPassword(username.value.trim(), password.value, rememberLogin.value)
-    if (rememberLogin.value) {
-      localStorage.setItem(REMEMBERED_CREDENTIALS_KEY, JSON.stringify({
-        username: username.value.trim(),
-        password: password.value,
-      }))
-    } else {
-      localStorage.removeItem(REMEMBERED_CREDENTIALS_KEY)
-    }
-    isAuthenticated.value = true
+    await userStore.login(username.value.trim(), password.value, rememberLogin.value)
     password.value = ''
     await router.replace({ name: 'admin' })
   } catch (error) {
@@ -114,32 +109,42 @@ async function login() {
  *     登录会话与“记住我”凭据是两类状态，退出不能意外清除用户的登录偏好。
  */
 async function logout() {
-  await logoutSession()
-  isAuthenticated.value = false
-  account.value = null
+  await userStore.logout()
   loginError.value = ''
-  try {
-    const saved = JSON.parse(localStorage.getItem(REMEMBERED_CREDENTIALS_KEY) || 'null')
-    username.value = typeof saved?.username === 'string' ? saved.username : ''
-    password.value = typeof saved?.password === 'string' ? saved.password : ''
-    rememberLogin.value = Boolean(username.value && password.value)
-  } catch {
-    localStorage.removeItem(REMEMBERED_CREDENTIALS_KEY)
-    username.value = ''
-    password.value = ''
-    rememberLogin.value = false
-  }
+  username.value = ''
+  password.value = ''
+  rememberLogin.value = true
   await router.replace({ name: 'admin-login' })
 }
 
 function handleExpired() {
-  isAuthenticated.value = false
-  account.value = null
+  userStore.clearToken()
+  userStore.setUserInfo(null)
   void router.replace({ name: 'admin-login' })
 }
 
-function navigate(key: NavKey) {
+function navigate(key: NavKey, libraryId?: number) {
   activeNav.value = key
+  if (key === 'libraries') selectedLibraryId.value = libraryId || undefined
+  if (key === 'documents' && !libraryId) {
+    documentFilterLibraryId.value = undefined
+    uploadLibraryId.value = undefined
+  }
+  mobileOpen.value = false
+}
+
+function viewLibraryDocuments(libraryId: number) {
+  documentFilterLibraryId.value = libraryId
+  uploadLibraryId.value = undefined
+  activeNav.value = 'documents'
+  mobileOpen.value = false
+}
+
+function importLibraryDocuments(libraryId: number) {
+  documentFilterLibraryId.value = undefined
+  uploadLibraryId.value = libraryId
+  uploadRequestId.value += 1
+  activeNav.value = 'documents'
   mobileOpen.value = false
 }
 
@@ -149,17 +154,7 @@ function updateCounts(nextCounts: Partial<AdminCounts>) {
 
 onMounted(() => {
   window.addEventListener('auth-expired', handleExpired)
-  try {
-    const saved = JSON.parse(localStorage.getItem(REMEMBERED_CREDENTIALS_KEY) || 'null')
-    if (saved && typeof saved.username === 'string' && typeof saved.password === 'string') {
-      username.value = saved.username
-      password.value = saved.password
-      rememberLogin.value = true
-    }
-  } catch {
-    localStorage.removeItem(REMEMBERED_CREDENTIALS_KEY)
-  }
-  if (route.name === 'admin' && hasAccessToken()) void loadCurrentUser()
+  if (route.name === 'admin' && isAuthenticated.value) void loadCurrentUser()
 })
 
 onBeforeUnmount(() => {
@@ -182,12 +177,12 @@ onBeforeUnmount(() => {
       <h1>登录管理端</h1>
       <p class="login-subtitle">使用已授权账号登录后管理知识库内容、用户与权限。</p>
 
-      <t-form class="login-form" @submit="login">
+      <t-form class="login-form" autocomplete="off" @submit="login">
         <div class="login-field">
           <t-input
             v-model="username"
-            name="username"
-            autocomplete="username"
+            name="admin-login-account"
+            autocomplete="off"
             placeholder="账号"
             clearable
             autofocus
@@ -200,7 +195,7 @@ onBeforeUnmount(() => {
             v-model="password"
             name="password"
             type="password"
-            autocomplete="current-password"
+            autocomplete="new-password"
             placeholder="登录密码"
             clearable
             @enter="login"
@@ -228,7 +223,6 @@ onBeforeUnmount(() => {
       :active-nav="activeNav"
       :user-menu-expanded="userMenuExpanded"
       :nav-items="navItems"
-      :document-count="counts.documents"
       :user-count="counts.users"
       :role-count="counts.roles"
       :permission-count="counts.permissions"
@@ -250,7 +244,8 @@ onBeforeUnmount(() => {
       />
       <div class="admin-content">
         <DashboardPage v-if="activeNav === 'dashboard'" @navigate="navigate" @update-counts="updateCounts" />
-        <DocumentsPage v-else-if="activeNav === 'documents'" @update-counts="updateCounts" />
+        <LibrariesPage v-else-if="activeNav === 'libraries'" :selected-library-id="selectedLibraryId" @update-counts="updateCounts" @view-documents="viewLibraryDocuments" @import-documents="importLibraryDocuments" />
+        <DocumentsPage v-else-if="activeNav === 'documents'" :filter-library-id="documentFilterLibraryId" :upload-library-id="uploadLibraryId" :upload-request-id="uploadRequestId" @navigate="navigate" @update-counts="updateCounts" />
         <UsersPage v-else-if="activeNav === 'users'" @update-counts="updateCounts" />
         <RolesPage v-else-if="activeNav === 'roles'" @update-counts="updateCounts" />
         <PermissionsPage v-else-if="activeNav === 'permissions'" @update-counts="updateCounts" />
@@ -260,4 +255,34 @@ onBeforeUnmount(() => {
     </main>
   </AdminLayout>
 </template>
+
+<style scoped>
+.admin-login-page { min-height: 100vh; display: grid; place-items: center; align-content: center; gap: 18px; padding: 24px; background: #f7f8fa; color: #1f2937; }
+.login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
+.login-brand > div:last-child { display: grid; gap: 2px; }
+.login-brand strong { font-size: 17px; }
+.login-brand span { color: #6b7280; font-size: 11px; }
+.login-card { box-sizing: border-box; width: min(100%, 420px); background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 32px; box-shadow: 0 12px 35px rgb(15 23 42 / 7%); }
+.login-card h1 { font-size: 24px; margin: 8px 0 6px; }
+.login-subtitle { color: #6b7280; font-size: 13px; line-height: 21px; margin: 0 0 26px; }
+.login-card .login-form { display: grid; gap: 16px; }
+.login-field { min-width: 0; }
+.login-field .t-input { box-sizing: border-box; width: 100%; min-width: 0; }
+.login-field .t-input__inner { font-size: 14px; }
+.login-field .t-input__prefix-icon { color: #8b95a7; }
+.login-options { display: flex; align-items: center; min-height: 20px; }
+.login-options .t-checkbox__label { color: #374151; font-size: 13px; }
+.login-error { min-height: 38px; box-sizing: border-box; display: flex; align-items: center; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 4px; padding: 8px 10px; font-size: 12px; line-height: 18px; }
+.login-card .t-button { margin-top: 2px; }
+.login-footer { color: #9ca3af; font-size: 11px; }
+.admin-main { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.admin-content { flex: 1; padding: 32px 36px 48px; overflow: auto; }
+.admin-backdrop { display: none; }
+@media (max-width: 1100px) { .admin-content { padding-left: 24px; padding-right: 24px; } }
+@media (max-width: 760px) {
+  .admin-content { padding: 24px 16px 40px; }
+  .admin-backdrop { display: block; position: fixed; inset: 0; background: rgb(15 23 42 / 35%); z-index: 10; }
+}
+@media (max-width: 480px) { .login-card { padding: 24px 20px; } }
+</style>
 

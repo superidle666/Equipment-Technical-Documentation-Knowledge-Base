@@ -17,6 +17,7 @@ class NodeEntry(BaseNode):
     name = "node_entry"
 
     def process(self, state: ImportGraphState):
+        """Validate the uploaded file and initialize PDF or Markdown state fields."""
         #从state中获取文件绝对路径
         import_file_path = state.get("import_file_path")
         #判断路径是否为空
@@ -33,12 +34,19 @@ class NodeEntry(BaseNode):
         if not import_file_path_obj.exists():
             raise FileProcessingError(message=f"文件{import_file_path_obj.name}不存在")
         #判断文件类型
-        if import_file_path_obj.suffix == ".pdf":
+        suffix = import_file_path_obj.suffix.lower()
+        if suffix == ".pdf":
             state["is_pdf_read_enabled"] = True
             state["pdf_path"] = import_file_path
-        elif import_file_path_obj.suffix == ".md":
+        elif suffix == ".md":
             state["is_md_read_enabled"] = True
             state["md_path"] = import_file_path
+            try:
+                state["md_content"] = import_file_path_obj.read_text(encoding="utf-8")
+            except UnicodeDecodeError as error:
+                raise FileProcessingError(
+                    message=f"Markdown 文件{import_file_path_obj.name}不是 UTF-8 编码"
+                ) from error
         else:
             raise ValidationError(message=f"该文件的后缀格式{import_file_path_obj.suffix}不支持")
         # 4. 获取上传文件的标题，更新到state中

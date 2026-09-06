@@ -12,6 +12,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # from app.import_process.agent.state import ImportGraphState
 
 from processor.import_processor.base import BaseNode, setup_logging
+from processor.import_processor.content_blocks import ContentBlock, build_content_blocks
 from processor.import_processor.state import ImportGraphState
 
 # --- 配置参数 (Configuration) ---
@@ -48,21 +49,31 @@ class NodeDocumentSplit(BaseNode):
         # 输出：标准化后的md_content、文件标题；
         content, file_title = self._step_1_get_inputs(state)
 
-        # ===================================== 步骤2：按MD标题进行初次切分 =====================================
-        # 作用：基于Markdown标题（#/##/###）切分文档为独立章节，自动跳过代码块内的伪标题，保证章节语义完整
-        # 输出：初切后的章节列表、识别到的有效标题数量、MD原始文本总行数（为后续统计/日志使用）
-        sections, title_count, lines_count = self._step_2_split_by_titles(content, file_title)
+        # ===================================== 步骤2：构建内容块并按标题块初次切分 =====================================
+        # 作用：先保留段落、表格、图片、OCR 等来源结构，再由标题块组织章节。
+        content_blocks = self._build_content_blocks(state, content)
+        state["content_blocks"] = content_blocks
+        state["image_metadata"] = self._collect_image_metadata(content_blocks)
+        sections, title_count, lines_count = self._step_2_split_by_blocks(content_blocks, file_title)
 
         # ===================================== 步骤3：无标题场景兜底处理 =====================================
         # 作用：解决MD文档无任何标题的边界情况，避免后续切分逻辑异常
         # 输出：有标题则返回步骤2的章节列表；无标题则将全文封装为单个「无标题」章节，保证数据格式统一
-        sections = self._step_3_handle_no_title(content, sections, title_count, file_title)
+        sections = self._step_3_handle_no_title_from_blocks(content_blocks, sections, title_count, file_title)
 
         # ===================================== 步骤4：Chunk精细化处理（长切短合） =====================================
         # 作用：核心切分逻辑，先将超长章节按「段落→句子」二次切分，再合并同父标题的过短章节，减少碎片化
         # 额外处理：对所有Chunk做parent_title兜底，适配Milvus向量库必填字段要求
         # 输出：长度适中、语义完整、低碎片化的最终Chunk列表（可直接用于向量入库/大模型调用）
-        sections = self._step_4_refine_chunks(sections)
+        max_content_length, min_content_length, chunk_overlap = self._get_chunking_config(state)
+        sections = self._step_4_refine_chunks(
+            sections,
+            content_blocks=content_blocks,
+            max_content_length=max_content_length,
+            min_content_length=min_content_length,
+            chunk_overlap=chunk_overlap,
+        )
+        sections = self._attach_chunk_metadata(state, sections)
 
         # ===================================== 步骤5：输出文档切分统计信息 =====================================
         # 作用：打印核心统计数据，便于监控切分效果、调试问题（原始行数/最终Chunk数/首个Chunk预览）
@@ -78,6 +89,191 @@ class NodeDocumentSplit(BaseNode):
         state["chunks"] = sections
 
         return state
+
+    def _get_chunking_config(self, state: ImportGraphState) -> tuple[int, int, int]:
+        """?????????????????????????"""
+        snapshot = state.get("config_snapshot") or {}
+        chunking_config = snapshot.get("chunking_config") or {}
+        max_content_length = int(chunking_config.get("chunk_size", self.config.max_content_length))
+        min_content_length = int(chunking_config.get("min_content_length", self.config.min_content_length))
+        chunk_overlap = int(chunking_config.get("chunk_overlap", 0))
+        if max_content_length < 1:
+            raise ValueError("chunk_size ??????")
+        if min_content_length < 0:
+            raise ValueError("min_content_length ?????")
+        if chunk_overlap < 0 or chunk_overlap >= max_content_length:
+            raise ValueError("chunk_overlap ?????????? chunk_size")
+        return max_content_length, min_content_length, chunk_overlap
+
+    def _build_content_blocks(self, state: ImportGraphState, content: str) -> list[ContentBlock]:
+        """将 Markdown、PDF 解析文本或独立 OCR 文本标准化为统一内容块。"""
+        source_file = state.get("md_path") or state.get("import_file_path") or ""
+        source_kind = "pdf_markdown" if state.get("is_pdf_read_enabled") else "markdown"
+        blocks = build_content_blocks(
+            content,
+            source_file=source_file,
+            source_kind=source_kind,
+            ocr_content=state.get("ocr_content", ""),
+        )
+        if not blocks:
+            raise ValueError("未从文档中解析到任何内容块")
+        self.logger.info(
+            "内容块解析完成：blocks=%s types=%s",
+            len(blocks),
+            ", ".join(sorted({block["block_type"] for block in blocks})),
+        )
+        return blocks
+
+    def _step_2_split_by_blocks(
+        self,
+        blocks: list[ContentBlock],
+        file_title: str,
+    ) -> Tuple[List[Dict[str, Any]], int, int]:
+        """按内容块中的标题组织章节，保留块顺序、类型、标题路径与页码。"""
+        sections: list[dict[str, Any]] = []
+        current_title = ""
+        current_title_path: list[str] = []
+        current_parts: list[str] = []
+        current_blocks: list[ContentBlock] = []
+        title_count = 0
+
+        def flush_section() -> None:
+            if not current_parts:
+                return
+            sections.append({
+                "title": current_title,
+                "content": "\n\n".join(current_parts),
+                "file_title": file_title,
+                "title_path": list(current_title_path),
+                "parent_title": current_title_path[-2] if len(current_title_path) > 1 else file_title,
+                "source_page": next(
+                    (block.get("page_number") for block in current_blocks if block.get("page_number") is not None),
+                    None,
+                ),
+                "content_block_orders": [block["order"] for block in current_blocks],
+                "content_block_types": list(dict.fromkeys(block["block_type"] for block in current_blocks)),
+                "chunk_type": ",".join(dict.fromkeys(block["block_type"] for block in current_blocks)),
+                "source_kind": ",".join(dict.fromkeys(block.get("source_kind", "") for block in current_blocks if block.get("source_kind"))),
+                "image_sources": [
+                    block["image_source"]
+                    for block in current_blocks
+                    if block.get("block_type") == "image" and block.get("image_source")
+                ],
+                "image_contexts": [
+                    block.get("image_context", "")
+                    for block in current_blocks
+                    if block.get("block_type") in {"image", "image_caption"}
+                ],
+                "image_metadata": self._collect_image_metadata(current_blocks),
+            })
+
+        for block in blocks:
+            if not block.get("primary", True):
+                continue
+            if block["block_type"] == "heading":
+                flush_section()
+                current_title = block["raw_content"].strip()
+                current_title_path = list(block["title_path"])
+                current_parts = [current_title]
+                current_blocks = [block]
+                title_count += 1
+                self.logger.info("识别标题：%s", current_title)
+                continue
+
+            raw_content = block.get("raw_content", "").strip()
+            if raw_content:
+                current_parts.append(raw_content)
+                current_blocks.append(block)
+
+        flush_section()
+        self.logger.info(
+            "文档粗切（按内容块标题切分）完成，共%s个章节，标题数量是%s，内容块共有%s个",
+            len(sections),
+            title_count,
+            len(blocks),
+        )
+        return sections, title_count, len(blocks)
+
+    def _attach_chunk_metadata(self, state: ImportGraphState, sections: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """?????????????????????????"""
+        import_path = state.get("import_file_path") or ""
+        file_name = Path(import_path).name or state.get("file_title", "")
+        for chunk_index, section in enumerate(sections):
+            section["chunk_index"] = chunk_index
+            section["knowledge_base_id"] = state.get("knowledge_base_id") or state.get("library_id")
+            section["library_id"] = state.get("library_id") or state.get("knowledge_base_id")
+            section["document_id"] = state.get("document_id")
+            section["document_version"] = state.get("document_version", 1)
+            section["file_name"] = file_name
+            section["item_name"] = section.get("item_name", state.get("item_name", "")) or ""
+            section["entity_recognition_mode"] = state.get("entity_recognition_mode", "disabled")
+            section.setdefault("source_page", section.get("page_number"))
+        return sections
+
+    @staticmethod
+    def _collect_image_metadata(blocks: list[ContentBlock]) -> list[dict[str, Any]]:
+        """Collect image source, order, page, and nearby caption metadata."""
+        captions = {
+            block.get("image_order"): block.get("content", "")
+            for block in blocks
+            if block.get("block_type") == "image_caption"
+        }
+        return [
+            {
+                "source": block.get("image_source", ""),
+                "order": block.get("image_order"),
+                "page_number": block.get("page_number"),
+                "context": block.get("image_context", ""),
+                "caption": captions.get(block.get("image_order"), ""),
+            }
+            for block in blocks
+            if block.get("block_type") == "image"
+        ]
+
+    def _step_3_handle_no_title_from_blocks(
+        self,
+        blocks: list[ContentBlock],
+        sections: List[Dict[str, Any]],
+        title_count: int,
+        file_title: str,
+    ) -> List[Dict[str, Any]]:
+        """无标题时仍以内容块为输入，避免回退为整篇 Markdown 字符串。"""
+        if title_count:
+            self.logger.debug("步骤3：检测到%s个有效标题，无需兜底处理", title_count)
+            return sections
+
+        primary_blocks = [block for block in blocks if block.get("primary", True)]
+        self.logger.warning("步骤3：未识别到任何MD标题，将内容块聚合为无标题章节，文件：%s", file_title)
+        return [{
+            "title": "无标题",
+            "content": "\n\n".join(
+                block["raw_content"].strip()
+                for block in primary_blocks
+                if block.get("raw_content", "").strip()
+            ),
+            "file_title": file_title,
+            "title_path": [],
+            "parent_title": file_title,
+            "source_page": next(
+                (block.get("page_number") for block in primary_blocks if block.get("page_number") is not None),
+                None,
+            ),
+            "content_block_orders": [block["order"] for block in primary_blocks],
+            "content_block_types": list(dict.fromkeys(block["block_type"] for block in primary_blocks)),
+            "chunk_type": ",".join(dict.fromkeys(block["block_type"] for block in primary_blocks)),
+            "source_kind": ",".join(dict.fromkeys(block.get("source_kind", "") for block in primary_blocks if block.get("source_kind"))),
+            "image_metadata": self._collect_image_metadata(primary_blocks),
+            "image_sources": [
+                block["image_source"]
+                for block in primary_blocks
+                if block.get("block_type") == "image" and block.get("image_source")
+            ],
+            "image_contexts": [
+                block.get("image_context", "")
+                for block in primary_blocks
+                if block.get("block_type") in {"image", "image_caption"}
+            ],
+        }]
 
     def _step_1_get_inputs(self, state: ImportGraphState) -> Tuple[str, str]:
         """
@@ -96,7 +292,7 @@ class NodeDocumentSplit(BaseNode):
         # 2、从状态中提取MD原始内容
         md_content = state.get("md_content", "")
         if not md_content:
-            raise ValueError("核心参数md_contenth缺失")
+            raise ValueError("核心参数 md_content 缺失")
 
         # 3、基础标准化：统一换行符，避免Windows/Linux换行符差异导致的后续处理异常
         # 原始混合换行："# HL3070说明书\r\n## 产品概述\nHL3070是扫描枪\r\n\r\n### 操作步骤"
@@ -203,7 +399,14 @@ class NodeDocumentSplit(BaseNode):
         self.logger.debug(f"步骤3：检测到{title_count}个有效标题，无需兜底处理")
         return sections
 
-    def _step_4_refine_chunks(self, sections: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def _step_4_refine_chunks(
+        self,
+        sections: List[Dict[str, Any]],
+        content_blocks: list[ContentBlock],
+        max_content_length: int,
+        min_content_length: int,
+        chunk_overlap: int,
+    ) -> List[Dict[str, Any]]:
         """
         【步骤4】Chunk精细化处理（核心：长切短合，适配大模型/检索）
         执行流程：1.切分超长章节 2.合并过短章节 3.父标题兜底（适配Milvus向量库schema）
@@ -211,15 +414,23 @@ class NodeDocumentSplit(BaseNode):
         :return: 长度适中、低碎片化的最终Chunk列表
         """
 
-        # 阶段1：切分超长章节 → 所有章节长度控制在max_len内
-        refined_split = []
+        block_lookup = {block["order"]: block for block in content_blocks}
+        refined_split: list[dict[str, Any]] = []
         for sec in sections:
-            # 对每个章节执行超长切分，结果平铺加入列表（避免嵌套）
-            refined_split.extend(self._split_long_section(sec))
+            refined_split.extend(self._split_long_section(
+                sec,
+                max_content_length=max_content_length,
+                chunk_overlap=chunk_overlap,
+                block_lookup=block_lookup,
+            ))
         self.logger.info(f"步骤4-1：超长章节切分完成，共生成{len(refined_split)}个初始子Chunk")
 
         # 阶段2：合并过短章节 → 减少碎片化，提升后续检索/大模型调用效果
-        final_sections = self._merge_short_sections(refined_split)
+        final_sections = self._merge_short_sections(
+            refined_split,
+            min_content_length=min_content_length,
+            max_content_length=max_content_length,
+        )
         self.logger.info(f"步骤4-2：过短章节合并完成，最终得到{len(final_sections)}个Chunk")
 
         # 阶段3：父标题兜底 → 适配Milvus向量库schema（parent_title为必填字段）
@@ -231,7 +442,109 @@ class NodeDocumentSplit(BaseNode):
 
         return final_sections
 
-    def _split_long_section(self, section: Dict[str, str]) -> List[Dict[str, str]]:
+    def _split_long_section(
+        self,
+        section: Dict[str, Any],
+        *,
+        max_content_length: int,
+        chunk_overlap: int,
+        block_lookup: dict[int, ContentBlock],
+    ) -> List[Dict[str, Any]]:
+        """优先在内容块边界切分；单个超长段落才使用递归字符切分兜底。"""
+        content = str(section.get("content", ""))
+        if len(content) <= max_content_length:
+            return [section]
+
+        title = str(section.get("title", ""))
+        prefix = f"{title}\n\n" if title else ""
+        available_length = max_content_length - len(prefix)
+        if available_length <= 0:
+            self.logger.warning("章节标题过长，保留原章节：%s", title[:20])
+            return [section]
+
+        section_blocks = [
+            block_lookup[order]
+            for order in section.get("content_block_orders", [])
+            if order in block_lookup and block_lookup[order].get("primary", True)
+        ]
+        body_blocks = [block for block in section_blocks if block["block_type"] != "heading"]
+        if not body_blocks:
+            return [section]
+
+        result: list[dict[str, Any]] = []
+        pending_parts: list[str] = []
+        pending_blocks: list[ContentBlock] = []
+
+        def append_chunk(parts: list[str], used_blocks: list[ContentBlock]) -> None:
+            if not parts:
+                return
+            part_number = len(result) + 1
+            result.append({
+                **section,
+                "title": f"{title}-{part_number}" if title else f"chunk-{part_number}",
+                "content": (prefix + "\n\n".join(parts)).strip(),
+                "part": part_number,
+                "content_block_orders": [block["order"] for block in used_blocks],
+                "content_block_types": list(dict.fromkeys(block["block_type"] for block in used_blocks)),
+                "source_page": next(
+                    (block.get("page_number") for block in used_blocks if block.get("page_number") is not None),
+                    section.get("source_page"),
+                ),
+            })
+
+        for block in body_blocks:
+            raw_content = block.get("raw_content", "").strip()
+            if not raw_content:
+                continue
+            projected_length = len("\n\n".join([*pending_parts, raw_content]))
+            if pending_parts and projected_length > available_length:
+                append_chunk(pending_parts, pending_blocks)
+                pending_parts, pending_blocks = [], []
+
+            if len(raw_content) <= available_length:
+                pending_parts.append(raw_content)
+                pending_blocks.append(block)
+                continue
+
+            if block["block_type"] == "table":
+                append_chunk(pending_parts, pending_blocks)
+                pending_parts, pending_blocks = [], []
+                table_rows = list(block.get("table_rows", []))
+                table_header = str(block.get("table_header_content", "")).strip()
+                if not table_rows or not table_header:
+                    self.logger.warning("表格缺少结构化行信息，完整保留为单个 Chunk：%s", title or "无标题")
+                    append_chunk([raw_content], [block])
+                    continue
+
+                table_parts: list[str] = [table_header]
+                for row in table_rows:
+                    candidate = "\n".join([*table_parts, row])
+                    if len(candidate) > available_length and len(table_parts) > 1:
+                        append_chunk(["\n".join(table_parts)], [block])
+                        table_parts = [table_header, row]
+                    else:
+                        table_parts.append(row)
+                if len(table_parts) > 1:
+                    append_chunk(["\n".join(table_parts)], [block])
+                continue
+
+            append_chunk(pending_parts, pending_blocks)
+            pending_parts, pending_blocks = [], []
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=available_length,
+                chunk_overlap=min(chunk_overlap, max(0, available_length - 1)),
+                separators=["\n\n", "\n", "。", "！", "？", "；", ".", "!", "?", ";", " "],
+            )
+            for text in splitter.split_text(raw_content):
+                normalized_text = text.strip()
+                if normalized_text:
+                    append_chunk([normalized_text], [block])
+
+        append_chunk(pending_parts, pending_blocks)
+        self.logger.debug("内容块超长切分完成：%s → 生成%s个子Chunk", title, len(result))
+        return result or [section]
+
+    def _split_long_section_legacy(self, section: Dict[str, str], max_content_length: int, chunk_overlap: int) -> List[Dict[str, str]]:
         """
         【辅助函数】超长章节二次切分（核心适配LangChain分割器）
         功能：单个章节内容超限时，按「段落→句子→空格」从粗到细切分，保留语义
@@ -242,7 +555,7 @@ class NodeDocumentSplit(BaseNode):
         # 内容空值兜底：无内容直接返回原章节
         content = section.get("content", "")
         # 长度未超限，无需切分，直接返回原章节（列表格式保持统一）
-        if len(content) <= DEFAULT_MAX_CONTENT_LENGTH:
+        if len(content) <= max_content_length:
             return [section]
 
         # 提取章节标题，用于组装子Chunk前缀（保留标题上下文）
@@ -250,7 +563,7 @@ class NodeDocumentSplit(BaseNode):
         # 标题前缀：带空行分隔，与正文区分开
         prefix = f"{title}\n\n" if title else ""
         # 计算正文可用长度：总长度 - 标题前缀长度（避免标题占满Chunk额度）
-        available_len = DEFAULT_MAX_CONTENT_LENGTH - len(prefix)
+        available_len = max_content_length - len(prefix)
         # 极端情况：标题长度超过阈值，无法切分，返回原章节
         if available_len <= 0:
             self.logger.warning(f"章节标题过长，无法切分：{title[:20]}...")
@@ -273,6 +586,11 @@ class NodeDocumentSplit(BaseNode):
 
         # 切分正文并组装子章节（带完整元信息，便于溯源）
         sub_sections = []
+        block_metadata = {
+            key: section[key]
+            for key in ("title_path", "source_page", "content_block_orders", "content_block_types")
+            if key in section
+        }
 
         # 遍历切分后的每个文本块，idx 从 1 开始计数
         for idx, chunk in enumerate(splitter.split_text(body), start=1):
@@ -292,12 +610,18 @@ class NodeDocumentSplit(BaseNode):
                 "parent_title": title,  # 父章节标题（用于后续合并）
                 "part": idx,  # 子Chunk序号
                 "file_title": section.get("file_title"),  # 所属文件标题
+                **block_metadata,
             })
 
         self.logger.debug(f"超长章节切分完成：{title} → 生成{len(sub_sections)}个子Chunk")
         return sub_sections
 
-    def _merge_short_sections(self, sections: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def _merge_short_sections(
+        self,
+        sections: List[Dict[str, Any]],
+        min_content_length: int,
+        max_content_length: int,
+    ) -> List[Dict[str, Any]]:
         """
         【辅助函数】过短章节合并（减少碎片化，提升检索效果）
         核心规则：仅合并「同父标题」且「当前块长度不足阈值」的相邻Chunk，避免跨章节合并
@@ -318,11 +642,13 @@ class NodeDocumentSplit(BaseNode):
                 current_chunk = sec
                 continue
 
-            # 合并条件：1.当前块长度不足阈值 2.与下一块同父标题（同属一个原章节）
-            is_current_short = len(current_chunk["content"]) < MIN_CONTENT_LENGTH
+            # 合并条件：同一标题路径、当前块过短且合并后不超过长度上限。
+            is_current_short = len(current_chunk["content"]) < min_content_length
             is_same_parent = current_chunk.get("parent_title") == sec.get("parent_title")
+            is_same_title_path = current_chunk.get("title_path") == sec.get("title_path")
+            merged_length = len(current_chunk["content"]) + 2 + len(sec["content"])
 
-            if is_current_short and is_same_parent:
+            if is_current_short and is_same_parent and is_same_title_path and merged_length <= max_content_length:
                 # 合并前清理：去掉下一块开头重复的父标题，避免内容冗余
                 parent_title = sec.get("parent_title", "")
                 next_content = sec["content"]
@@ -333,6 +659,11 @@ class NodeDocumentSplit(BaseNode):
                 # 更新子Chunk序号：保留最新序号，便于溯源
                 if "part" in sec:
                     current_chunk["part"] = sec["part"]
+                for key in ("content_block_orders", "content_block_types"):
+                    current_values = current_chunk.get(key)
+                    next_values = sec.get(key)
+                    if isinstance(current_values, list) and isinstance(next_values, list):
+                        current_chunk[key] = list(dict.fromkeys([*current_values, *next_values]))
                 self.logger.debug(
                     f"合并短Chunk：{current_chunk.get('parent_title')} → 累计长度{len(current_chunk['content'])}")
             else:
@@ -368,7 +699,11 @@ class NodeDocumentSplit(BaseNode):
 
         try:
             # 拼接备份文件路径：固定文件名，便于查找
-            backup_path = Path(state["md_path"]).parent / "chunks.json"
+            knowledge_base_id = state.get("knowledge_base_id") or state.get("library_id") or "unknown-kb"
+            document_id = state.get("document_id") or "unknown-document"
+            document_version = state.get("document_version", 1)
+            backup_name = f"chunks-kb-{knowledge_base_id}-doc-{document_id}-v-{document_version}.json"
+            backup_path = Path(state["md_path"]).parent / backup_name
             # 写入JSON文件：保留中文/格式化缩进，便于人工查看
             with open(backup_path, "w", encoding="utf-8") as f:
                 """

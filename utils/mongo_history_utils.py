@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 # 导入pymongo核心模块：MongoDB原生Python驱动，实现数据库连接和操作
 # ASCENDING：表示升序排序，用于MongoDB索引和查询排序
-from pymongo import MongoClient, ASCENDING
+from pymongo import ASCENDING, DESCENDING, MongoClient
 # 导入bson的ObjectId：MongoDB默认的主键类型，用于唯一标识文档
 from bson import ObjectId
 # 导入dotenv模块：用于从.env文件加载环境变量，避免硬编码敏感配置（如MongoDB连接地址）
@@ -43,11 +43,14 @@ class HistoryMongoTool:
             self.db = self.client[self.db_name]
             # 获取对话记录的集合（相当于关系型数据库的表），集合名：chat_message
             self.chat_message = self.db["chat_message"]
+            self.chat_session = self.db["chat_session"]
 
             # 为chat_message集合创建复合索引，提升查询性能
             # 索引规则：session_id升序 + ts降序，适配"按会话查最新记录"的核心查询场景
             # create_index自带幂等性：索引已存在时不会重复创建，无需额外判断
             self.chat_message.create_index([("session_id", 1), ("ts", -1)])
+            self.chat_session.create_index([("user_id", 1), ("updated_at", -1)])
+            self.chat_session.create_index([("user_id", 1), ("library_id", 1), ("updated_at", -1)])
 
             # 记录成功日志，确认数据库连接和初始化完成
             logging.info(f"Successfully connected to MongoDB: {self.db_name}")
@@ -104,7 +107,8 @@ def save_chat_message(
         rewritten_query: str = "",
         item_names: List[str] = None,
         image_urls: List[str] = None,
-        message_id: str = None
+        message_id: str = None,
+        sources: List[Dict[str, Any]] = None,
 ) -> str:
     """
     写入/更新单条会话记录到MongoDB
@@ -129,6 +133,7 @@ def save_chat_message(
         "rewritten_query": rewritten_query or "",  # 问题优化后的改写，空值处理为空字符串
         "item_names": item_names,  # 关联商品名称列表
         "image_urls": image_urls,  # 关联图片URL列表
+        "sources": sources or [],
         "ts": ts  # 时间戳，排序和时间筛选维度
     }
 
@@ -148,6 +153,65 @@ def save_chat_message(
         result = mongo_tool.chat_message.insert_one(document)
         # 新增操作返回插入的ObjectId并转为字符串，便于上层使用（避免直接返回ObjectId对象）
         return str(result.inserted_id)
+
+
+def ensure_user_session(session_id: str, user_id: int, library_id: int, title: str) -> None:
+    """创建用户会话，或校验已有会话的用户与知识库归属。"""
+    mongo_tool = get_history_mongo_tool()
+    now = datetime.now().timestamp()
+    existing = mongo_tool.chat_session.find_one({"_id": session_id})
+    if existing:
+        if existing.get("user_id") != user_id:
+            raise ValueError("会话不属于当前用户")
+        if existing.get("library_id") != library_id:
+            raise ValueError("会话不能跨知识库使用")
+        mongo_tool.chat_session.update_one({"_id": session_id}, {"$set": {"updated_at": now}})
+        return
+
+    mongo_tool.chat_session.insert_one({
+        "_id": session_id,
+        "user_id": user_id,
+        "library_id": library_id,
+        "title": title.strip()[:64] or "新建技术咨询",
+        "created_at": now,
+        "updated_at": now,
+    })
+
+
+def touch_user_session(session_id: str) -> None:
+    """更新会话最近活跃时间，使其在侧栏按最新对话排序。"""
+    get_history_mongo_tool().chat_session.update_one(
+        {"_id": session_id},
+        {"$set": {"updated_at": datetime.now().timestamp()}},
+    )
+
+
+def list_user_sessions(user_id: int, library_id: int | None = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """返回当前用户可见的会话摘要，按最近活跃时间倒序。"""
+    query: Dict[str, Any] = {"user_id": user_id}
+    if library_id is not None:
+        query["library_id"] = library_id
+    return list(
+        get_history_mongo_tool().chat_session
+        .find(query)
+        .sort("updated_at", DESCENDING)
+        .limit(max(1, min(limit, 100)))
+    )
+
+
+def get_user_session(session_id: str, user_id: int) -> Optional[Dict[str, Any]]:
+    """按用户范围读取单个会话，避免会话 ID 被跨用户访问。"""
+    return get_history_mongo_tool().chat_session.find_one({"_id": session_id, "user_id": user_id})
+
+
+def get_session_messages(session_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """读取完整会话消息用于前端恢复，按发生顺序返回。"""
+    return list(
+        get_history_mongo_tool().chat_message
+        .find({"session_id": session_id})
+        .sort("ts", ASCENDING)
+        .limit(max(1, min(limit, 500)))
+    )
 
 
 def update_message_item_names(ids: List[str], item_names: List[str]) -> int:
@@ -195,15 +259,9 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
         # 构造查询条件：仅查询指定session_id的记录
         query = {"session_id": session_id}
 
-        # 执行查询：按时间戳升序排序，限制返回条数
-        # find(query)：获取符合条件的游标（惰性加载，不立即查询）
-        # sort("ts", ASCENDING)：按ts字段升序（从旧到新），适配LLM上下文顺序
-        # limit(limit)：限制返回的最大条数
-        cursor = mongo_tool.chat_message.find(query).sort("ts", ASCENDING).limit(limit)
-        # 将游标转为列表，触发实际数据库查询，获取所有符合条件的文档
-        messages = list(cursor)
-        # 返回查询结果列表
-        return messages
+        # 先倒序获取最新 N 条，再翻转为时间正序，确保模型读取到最近上下文。
+        cursor = mongo_tool.chat_message.find(query).sort("ts", DESCENDING).limit(max(1, limit))
+        return list(reversed(list(cursor)))
     except Exception as e:
         # 捕获查询异常，记录错误日志
         logging.error(f"Error getting recent messages: {e}")

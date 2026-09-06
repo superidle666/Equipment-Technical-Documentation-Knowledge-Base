@@ -1,7 +1,7 @@
 
 from typing import TypedDict, List
 
-class QueryGraphState(TypedDict):
+class QueryGraphState(TypedDict, total=False):
     """
     查询流程图状态
     包含整个查询流程中传递的所有数据。
@@ -11,6 +11,11 @@ class QueryGraphState(TypedDict):
     message_id: str  # 消息ID
 
     original_query: str  # 用户原始问题
+    library_id: int  # 当前检索知识库 ID
+    top_k: int  # 最终返回来源数量
+    retrieval_top_k: int  # Milvus 初始召回数量
+    use_hyde: bool  # 是否启用 HyDE 检索
+    use_web_search: bool  # 是否启用联网检索
 
     # 检索过程中的中间数据
     embedding_chunks: list  # 普通向量检索回来的切片
@@ -20,6 +25,8 @@ class QueryGraphState(TypedDict):
     # 排序过程中的数据
     rrf_chunks: list  # RRF 融合排序后的切片
     reranked_docs: list  # 重排序后的最终 Top-K 文档
+    rerank_failed: bool  # 重排序服务是否失败并回退到原始召回
+    sources: list  # 面向用户端的来源列表
 
     # 生成过程中的数据
     prompt: str  # 组装好的 Prompt
@@ -30,3 +37,4 @@ class QueryGraphState(TypedDict):
     rewritten_query: str  # 改写后的问题
     history: list  # 历史对话记录
     is_stream: bool  # 是否流式输出
+    persist_history: bool  # 是否由工作流写入 Mongo 历史（新 API 由接口统一保存）

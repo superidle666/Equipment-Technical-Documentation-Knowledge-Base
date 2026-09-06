@@ -59,3 +59,35 @@ const emit = defineEmits<{
     </div>
   </header>
 </template>
+
+<style scoped>
+.admin-topbar {
+  height: 64px;
+  flex: 0 0 64px;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 0 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.admin-top-left,
+.admin-top-right { display: flex; align-items: center; gap: 10px; }
+.admin-top-left svg { width: 15px; color: #9ca3af; }
+.admin-breadcrumb { color: #6b7280; font-size: 12px; }
+.admin-top-left strong { font-size: 13px; }
+.admin-env { display: flex; align-items: center; gap: 6px; color: #15803d; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 4px 8px; border-radius: 4px; font-size: 11px; }
+.admin-env span { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: #22c55e; }
+.admin-top-account { display: grid; gap: 2px; text-align: right; min-width: 0; }
+.admin-top-account strong { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+.admin-top-account span { color: #9ca3af; font-size: 10px; }
+.admin-top-logout { color: #6b7280; }
+.admin-top-logout:hover { color: #dc2626; background: #fef2f2; }
+.admin-top-logout svg { width: 17px; }
+.admin-mobile-menu { display: none; }
+@media (max-width: 760px) {
+  .admin-topbar { padding: 0 16px; }
+  .admin-mobile-menu { display: inline-flex; }
+  .admin-env { display: none; }
+}
+</style>

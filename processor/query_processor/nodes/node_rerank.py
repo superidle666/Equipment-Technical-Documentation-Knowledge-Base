@@ -39,6 +39,10 @@ class NodeRerank(NodeBase):
         # 1. 合并多源文档
         merged_multi_docs: List[Dict[str, Any]] = self._step_1_merge_multi_source_docs(state)
 
+        if not merged_multi_docs:
+            state['reranked_docs'] = []
+            return state
+
         # 2. Rerank 精排(精排打分)
         reranked_docs: List[Dict[str, Any]] = self._step_2_rerank_merged_docs(state, merged_multi_docs)
 
@@ -58,17 +62,11 @@ class NodeRerank(NodeBase):
 
         # 1. 获取本地 RRF 的文档
         for rrf_doc in state.get('rrf_chunks') or []:
-            format_rrf_doc = {
-                "content": rrf_doc.get('content'),
-                "title": rrf_doc.get('title'),
-                "chunk_id": rrf_doc.get('chunk_id'),
-                "url": None,
-                "source": "local"
-            }
+            format_rrf_doc = {**rrf_doc, "url": None, "source": "local"}
             final_docs.append(format_rrf_doc)
 
         # 2. 获取 web 远程的文档
-        for web_doc in state.get('web_search_docs'):
+        for web_doc in state.get('web_search_docs') or []:
             format_web_doc = {
                 "content": web_doc.get('snippet'),
                 "title": web_doc.get('title'),
@@ -85,7 +83,7 @@ class NodeRerank(NodeBase):
         """使用 Reranker 模型对文档进行精排"""
 
         try:
-            user_query = state.get('rewritten_query')
+            user_query = state.get('rewritten_query') or state.get('original_query') or ''
             # 获取文档列表的conten字段组成列表
             contents = [doc.get("content") for doc in merged_multi_docs]
             # 调用Rerank模型：交叉编码器（精排阶段）
@@ -110,12 +108,14 @@ class NodeRerank(NodeBase):
                 key=lambda x: x["score"],
                 reverse=True
             )
+            state["rerank_failed"] = False
 
             return sorted_score_docs
 
         except Exception as e:
             logger.error(f"Rerank 重排序失败: {str(e)}")
-            return [{**merged_multi_docs, "score": None}]
+            state["rerank_failed"] = True
+            return [{**doc, "score": doc.get("vector_score")} for doc in merged_multi_docs]
 
     def _step_3_cliff_cutoff(self, ranked_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """断崖检测截断：相邻得分差距超过阈值时截断。"""

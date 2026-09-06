@@ -1,19 +1,27 @@
 <!-- 文档管理：文件上传、元数据维护、标签关联和 Chunk 预览。 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { AddIcon, EditIcon, FileIcon, SearchIcon } from 'tdesign-icons-vue-next'
 import {
   mysqlApi,
   type Library,
 } from '../../../api/mysql'
+import { DOCUMENT_STATUS, PAGINATION } from '../../../constants'
 import { mapDocument, type DocumentRow } from '../shared/formatters'
 import DocumentDetailDialog from './DocumentDetailDialog.vue'
+import ImportTaskDialog from './ImportTaskDialog.vue'
 import DocumentUploadDialog from './DocumentUploadDialog.vue'
-import LibraryManagerDialog from './LibraryManagerDialog.vue'
 import TagManagerDialog from './TagManagerDialog.vue'
+
+const props = defineProps<{
+  filterLibraryId?: number
+  uploadLibraryId?: number
+  uploadRequestId?: number
+}>()
 
 const emit = defineEmits<{
   (event: 'update-counts', counts: { documents: number }): void
+  (event: 'navigate', key: 'libraries' | 'documents', libraryId: number): void
 }>()
 const libraries = ref<Library[]>([])
 const documents = ref<DocumentRow[]>([])
@@ -23,12 +31,15 @@ const selectedTags = ref<string[]>([])
 const tags = ref<Array<{ id: number; name: string }>>([])
 const loading = ref(false)
 const errorMessage = ref('')
-const documentAction = ref<{ id: number; type: 'status' | 'delete' }>()
+const documentAction = ref<{ id: number; type: 'delete' }>()
 const showUpload = ref(false)
+const requestedUploadLibraryId = ref<number>()
 const showDetail = ref(false)
 const selectedDocumentId = ref<number>()
-const showLibraryManager = ref(false)
 const showTagManager = ref(false)
+const showImportTasks = ref(false)
+const tablePage = ref(1)
+const tablePageSize = ref<number>(PAGINATION.PAGE_SIZE)
 
 const columns = [
   { colKey: 'name', title: '文档名称', width: 280 },
@@ -37,6 +48,7 @@ const columns = [
   { colKey: 'size', title: '大小', width: 110, align: 'center' },
   { colKey: 'updated', title: '更新时间', width: 160, align: 'center' },
   { colKey: 'statusLabel', title: '状态', width: 100, align: 'center' },
+  { colKey: 'chunkCount', title: 'Chunk', width: 80, align: 'center' },
   { colKey: 'tags', title: '标签', width: 180 },
   { colKey: 'op', title: '操作', width: 190, align: 'center' },
 ]
@@ -52,6 +64,10 @@ const libraryOptions = computed(() =>
     .map((item) => ({ label: item.name, value: item.id })),
 )
 const tagOptions = computed(() => tags.value.map((tag) => ({ label: tag.name, value: tag.name })))
+const selectedLibraryId = computed(() => {
+  if (selectedLibrary.value === '全部知识库') return undefined
+  return libraries.value.find((library) => library.name === selectedLibrary.value)?.id
+})
 const filteredDocuments = computed(() => {
   const query = search.value.trim().toLowerCase()
   return documents.value.filter((item) => {
@@ -65,9 +81,36 @@ const filteredDocuments = computed(() => {
   })
 })
 
+const tablePagination = computed(() => ({
+  current: tablePage.value,
+  pageSize: tablePageSize.value,
+  total: filteredDocuments.value.length,
+  pageSizeOptions: [...PAGINATION.PAGE_SIZES],
+}))
+
+function handlePageChange(pageInfo: { current: number; pageSize: number }) {
+  tablePage.value = pageInfo.current
+  tablePageSize.value = pageInfo.pageSize
+}
+
+watch([search, selectedLibrary, selectedTags], () => {
+  tablePage.value = 1
+}, { deep: true })
+
+watch(() => props.uploadRequestId, (requestId) => {
+  if (!requestId || !props.uploadLibraryId) return
+  requestedUploadLibraryId.value = props.uploadLibraryId
+  showUpload.value = true
+}, { immediate: true })
+
+watch(showUpload, (visible) => {
+  if (!visible) requestedUploadLibraryId.value = undefined
+})
+
 function getDocumentTheme(row: DocumentRow) {
-  if (row.status === 'published') return 'success'
-  if (row.status === 'failed') return 'danger'
+  if (row.status === DOCUMENT_STATUS.READY) return 'success'
+  if (row.status === DOCUMENT_STATUS.FAILED) return 'danger'
+  if (row.status === DOCUMENT_STATUS.DELETED) return 'default'
   return 'warning'
 }
 async function loadDocuments() {
@@ -75,11 +118,15 @@ async function loadDocuments() {
   errorMessage.value = ''
   try {
     const [libraryData, documentData, tagData] = await Promise.all([
-      mysqlApi.listLibraries(true, true),
+      mysqlApi.listLibraries(true, false),
       mysqlApi.listDocuments(),
       mysqlApi.listTags(),
     ])
     libraries.value = libraryData
+    const filterLibrary = libraryData.find((library) =>
+      library.id === props.filterLibraryId && library.status === 'active' && !library.deleted_at,
+    )
+    if (filterLibrary) selectedLibrary.value = filterLibrary.name
     if (
       selectedLibrary.value !== '全部知识库' &&
       !libraryData.some(
@@ -115,25 +162,13 @@ function openDetail(row: DocumentRow) {
   selectedDocumentId.value = row.id
   showDetail.value = true
 }
+function openUploadForSelectedLibrary() {
+  requestedUploadLibraryId.value = selectedLibraryId.value
+  showUpload.value = true
+}
 function showError(message: string) {
   errorMessage.value = message
 }
-/** 发布或下架文档；接口失败时保留当前列表并显示可重试提示。 */
-async function togglePublish(row: DocumentRow) {
-  if (documentAction.value) return
-
-  const status = row.status === 'published' ? 'uploaded' : 'published'
-  documentAction.value = { id: row.id, type: 'status' }
-  try {
-    await mysqlApi.updateDocument(row.id, { status })
-    await loadDocuments()
-  } catch (error) {
-    showError(error instanceof Error ? error.message : '文档状态更新失败')
-  } finally {
-    documentAction.value = undefined
-  }
-}
-
 /** 删除文档前二次确认；失败时不会从当前列表中移除。 */
 async function deleteDocument(row: DocumentRow) {
   if (documentAction.value) return
@@ -149,19 +184,12 @@ async function deleteDocument(row: DocumentRow) {
     documentAction.value = undefined
   }
 }
-function handleLibraryUpdated(library?: Library) {
-  void loadDocuments().then(() => {
-    if (library && library.status === 'active' && !library.deleted_at) {
-      selectedLibrary.value = library.name
-      return
-    }
-    if (library && selectedLibrary.value === library.name) {
-      selectedLibrary.value = '全部知识库'
-    }
-  })
-}
 function handleTagUpdated() {
   void loadDocuments()
+}
+function openTaskDocument(documentId: number) {
+  selectedDocumentId.value = documentId
+  showDetail.value = true
 }
 onMounted(() => void loadDocuments())
 </script>
@@ -170,14 +198,17 @@ onMounted(() => void loadDocuments())
   <section class="admin-module">
     <div class="admin-page-head compact">
       <div><div class="eyebrow">KNOWLEDGE BASE</div><h1>文档管理</h1><p>上传、整理和维护设备技术资料。</p></div>
-      <t-button theme="primary" class="create-action" @click="showUpload = true"><AddIcon />新增文档</t-button>
+      <div class="document-head-actions">
+        <t-button variant="outline" @click="showImportTasks = true">导入队列</t-button>
+        <t-button theme="primary" class="create-action" @click="openUploadForSelectedLibrary"><AddIcon />新增文档</t-button>
+      </div>
     </div>
     <div v-if="errorMessage" class="admin-error">{{ errorMessage }}<button @click="loadDocuments">重试</button></div>
     <div v-if="loading" class="admin-loading">正在加载文档数据...</div>
     <div class="toolbar">
       <div class="library-filter">
         <div class="library-tabs"><button v-for="library in libraryTabs" :key="library" :class="{ active: selectedLibrary === library }" @click="selectedLibrary = library">{{ library }}</button></div>
-        <t-button theme="primary" size="small" class="metadata-action-button" @click="showLibraryManager = true">
+        <t-button theme="primary" size="small" class="metadata-action-button" @click="emit('navigate', 'libraries', selectedLibraryId || 0)">
           <template #icon><FileIcon /></template>
           知识库管理
         </t-button>
@@ -192,9 +223,10 @@ onMounted(() => void loadDocuments())
       </div>
     </div>
     <div class="panel table-panel">
-      <t-table :data="filteredDocuments" :columns="columns" row-key="id" bordered="false">
+      <t-table :data="filteredDocuments" :columns="columns" row-key="id" bordered="false" table-layout="fixed" :pagination="tablePagination" @page-change="handlePageChange">
         <template #name="{ row }"><div class="doc-name"><FileIcon />{{ row.name }}</div></template>
         <template #statusLabel="{ row }"><t-tag :theme="getDocumentTheme(row)" variant="light">{{ row.statusLabel }}</t-tag></template>
+        <template #chunkCount="{ row }"><span>{{ row.chunk_count ?? '-' }}</span></template>
         <template #tags="{ row }"><div class="document-tags"><t-tag v-for="tag in row.tags || []" :key="tag" variant="light-outline">{{ tag }}</t-tag><span v-if="!row.tags?.length">-</span></div></template>
         <template #op="{ row }">
           <div class="table-actions table-actions--multiple">
@@ -207,13 +239,6 @@ onMounted(() => void loadDocuments())
             >详情</t-button>
             <t-button
               variant="text"
-              size="small"
-              :loading="documentAction?.id === row.id && documentAction?.type === 'status'"
-              :disabled="Boolean(documentAction) && documentAction?.id !== row.id"
-              @click="togglePublish(row)"
-            >{{ row.status === 'published' ? '下架' : '发布' }}</t-button>
-            <t-button
-              variant="text"
               theme="danger"
               size="small"
               :loading="documentAction?.id === row.id && documentAction?.type === 'delete'"
@@ -222,11 +247,14 @@ onMounted(() => void loadDocuments())
             >删除</t-button>
           </div>
         </template>
-      </t-table>
+              <template #totalContent><span class="table-pagination-total">共 {{ filteredDocuments.length }} 条数据</span></template>
+</t-table>
     </div>
-    <DocumentUploadDialog
+    <ImportTaskDialog v-model:visible="showImportTasks" @error="showError" @updated="loadDocuments" @open-document="openTaskDocument" />
+        <DocumentUploadDialog
       v-model:visible="showUpload"
       :library-options="libraryOptions"
+      :initial-library-id="requestedUploadLibraryId"
       @uploaded="loadDocuments"
       @error="showError"
     />
@@ -236,12 +264,6 @@ onMounted(() => void loadDocuments())
       @updated="loadDocuments"
       @error="showError"
     />
-    <LibraryManagerDialog
-      v-model:visible="showLibraryManager"
-      :libraries="libraries"
-      @updated="handleLibraryUpdated"
-      @error="showError"
-    />
     <TagManagerDialog
       v-model:visible="showTagManager"
       @updated="handleTagUpdated"
@@ -249,3 +271,23 @@ onMounted(() => void loadDocuments())
     />
   </section>
 </template>
+
+<style scoped>
+.document-head-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.library-filter { min-width: 0; flex: 1; display: flex; align-items: center; gap: 10px; }
+.library-filter .library-tabs { min-width: 0; flex: 1; max-height: 52px; padding-bottom: 8px; overflow-x: auto; overflow-y: hidden; flex-wrap: nowrap; scrollbar-gutter: stable; }
+.library-filter .library-tabs button { flex: 0 0 auto; white-space: nowrap; }
+.metadata-action-button { flex: 0 0 auto; height: 32px; min-height: 32px; padding: 0 12px; color: #fff; white-space: nowrap; }
+.metadata-action-button .t-button__content, .metadata-action-button .t-button__text { display: inline-flex; align-items: center; gap: 6px; line-height: 1; }
+.metadata-action-button .t-button__icon, .metadata-action-button .t-icon { display: inline-flex; align-items: center; flex: 0 0 auto; margin: 0; color: #fff; }
+.metadata-action-button:hover, .metadata-action-button:focus { color: #fff; }
+.document-filters { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.tag-filter { width: 180px; }
+.tag-manage-button { flex: 0 0 auto; }
+.doc-name { display: flex; align-items: center; gap: 8px; }
+.doc-name svg { color: #2563eb; width: 16px; }
+.document-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.document-tags .t-tag { max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 760px) { .document-head-actions { width: 100%; justify-content: flex-end; } }
+@media (max-width: 560px) { .document-filters { align-items: stretch; flex-wrap: wrap; justify-content: flex-start; } .tag-filter, .table-search { width: 100%; max-width: none; } }
+</style>

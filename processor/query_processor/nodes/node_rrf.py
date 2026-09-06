@@ -18,12 +18,8 @@ class NodeRrf(NodeBase):
 
     def process(self, state: QueryGraphState) -> QueryGraphState:
         # 1. 获取各路搜索的结果（排除网络搜索: reranK节点做）
-        embedding_search_list = [
-            doc.get('entity') for doc in (state.get('embedding_chunks') or []) if isinstance(doc, dict)
-        ]
-        hyde_embedding_search_list = [
-            doc.get('entity') for doc in (state.get('hyde_embedding_chunks') or []) if isinstance(doc, dict)
-        ]
+        embedding_search_list = self._unwrap(state.get('embedding_chunks') or [])
+        hyde_embedding_search_list = self._unwrap(state.get('hyde_embedding_chunks') or [])
 
         # 2. 为不同路的搜索结果设置不同的权重
         rrf_inputs = [
@@ -43,6 +39,13 @@ class NodeRrf(NodeBase):
         # 6. 返回state
         return state
 
+    @staticmethod
+    def _unwrap(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            doc.get("entity") if isinstance(doc.get("entity"), dict) else doc
+            for doc in documents if isinstance(doc, dict)
+        ]
+
     def _rrf_merge(self, rrf_inputs, k: int = 60, max_results: int = None) -> List[Tuple[Dict[str, Any], float]]:
         """
         利用 RRF 公式计算每一个文档的总得分
@@ -56,7 +59,9 @@ class NodeRrf(NodeBase):
 
         for rrf_input, weight in rrf_inputs:
             for rank, doc in enumerate(rrf_input, start=1):
-                chunk_id = doc.get('chunk_id')
+                chunk_id = doc.get('chunk_id') or doc.get('id')
+                if chunk_id is None:
+                    continue
                 # RRF 公式: score += weight / (k + rank)
                 chunk_scores[chunk_id] = chunk_scores.get(chunk_id, 0.0) + weight / (k + rank)
 

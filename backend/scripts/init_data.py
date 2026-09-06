@@ -129,16 +129,16 @@ async def seed() -> None:
                 session.add(LibraryMember(library_id=libraries[library_code].id, user_id=users[username].id, access_level="write" if username == "zhang" else "read"))
 
         document_defs = [
-            ("industrial-equipment", "HAK180 用户手册", "HAK180 用户手册.pdf", "documents/industrial/HAK180-manual.pdf", "application/pdf", 12400000, "published"),
-            ("industrial-equipment", "HAK180 维护指南", "HAK180 维护指南.pdf", "documents/industrial/HAK180-maintenance.pdf", "application/pdf", 8700000, "published"),
-            ("network-equipment", "LA2608 网关配置说明", "LA2608 网关配置说明.docx", "documents/network/LA2608-config.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 2100000, "published"),
+            ("industrial-equipment", "HAK180 用户手册", "HAK180 用户手册.pdf", "documents/industrial/HAK180-manual.pdf", "application/pdf", 12400000, "ready"),
+            ("industrial-equipment", "HAK180 维护指南", "HAK180 维护指南.pdf", "documents/industrial/HAK180-maintenance.pdf", "application/pdf", 8700000, "ready"),
+            ("network-equipment", "LA2608 网关配置说明", "LA2608 网关配置说明.docx", "documents/network/LA2608-config.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 2100000, "ready"),
             ("after-sales", "售后服务标准流程", "售后服务标准流程.pdf", "documents/after-sales/service-process.pdf", "application/pdf", 5600000, "processing"),
         ]
         documents: dict[str, Document] = {}
         for library_code, title, filename, storage_key, mime_type, file_size, doc_status in document_defs:
             document = (await session.execute(select(Document).where(Document.storage_key == storage_key))).scalar_one_or_none()
             if document is None:
-                document = Document(library_id=libraries[library_code].id, title=title, original_filename=filename, storage_key=storage_key, mime_type=mime_type, file_size=file_size, status=doc_status, uploaded_by=users["admin"].id, published_at=func.now() if doc_status == "published" else None)
+                document = Document(library_id=libraries[library_code].id, title=title, original_filename=filename, storage_key=storage_key, mime_type=mime_type, file_size=file_size, status=doc_status, uploaded_by=users["admin"].id, published_at=func.now() if doc_status == "ready" else None)
                 session.add(document)
                 libraries[library_code].document_count += 1
             documents[storage_key] = document

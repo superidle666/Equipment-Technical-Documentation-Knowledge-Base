@@ -14,6 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 from backend.app.api.auth import router as auth_router
 from backend.app.api.health import router as health_router
 from backend.app.api.mysql import router as mysql_router
+from backend.app.api.query import router as query_router
 from backend.app.api.settings import router as settings_router
 from backend.app.core.config import settings
 from backend.app.core.permissions import sync_permission_registry
@@ -88,6 +89,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(mysql_router)
+app.include_router(query_router)
 app.include_router(settings_router)
 app.mount(f"{settings.api_v1_prefix}/import", LazyASGIApp(_load_import_app), name="import-api")
 app.mount(f"{settings.api_v1_prefix}/chat", LazyASGIApp(_load_query_app), name="chat-api")

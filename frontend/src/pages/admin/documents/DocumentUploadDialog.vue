@@ -12,6 +12,7 @@ const emit = defineEmits<{
 const props = defineProps<{
   visible: boolean
   libraryOptions: Array<{ label: string; value: number }>
+  initialLibraryId?: number
 }>()
 const files = ref<File[]>([])
 const libraryId = ref<number>()
@@ -37,7 +38,7 @@ const uploadFormHint = computed(() => {
   }
   if (!libraryId.value) return '请选择知识库。'
   if (!files.value.length) return '请添加上传文件。'
-  return `已选择知识库和 ${files.value.length} 个文件，可以开始上传。`
+  return `已选择知识库和 ${files.value.length} 个文件，将作为同一批次提交。`
 })
 
 const isUploadHintError = computed(() => Boolean(uploadError.value))
@@ -99,36 +100,20 @@ function clearFileInput() {
   if (fileInput.value) fileInput.value.value = ''
 }
 
-/** 逐个调用现有上传接口，确保单个文件失败不会影响其他文件。 */
+/** 一次提交整批文件，由后端统一校验本次上传和知识库配额。 */
 async function upload() {
   if (!files.value.length || !libraryId.value) {
     return
   }
   uploadError.value = ''
   uploading.value = true
-  const failedFiles: string[] = []
-  const failedFileItems: File[] = []
   try {
-    for (const file of files.value) {
-      try {
-        await mysqlApi.uploadDocument(file, libraryId.value)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : '上传失败'
-        failedFiles.push(`${file.name}（${message}）`)
-        failedFileItems.push(file)
-      }
-    }
-    if (failedFiles.length) {
-      uploadError.value = `以下文件上传失败：${failedFiles.join('、')}`
-    }
-    if (failedFiles.length < files.value.length) {
-      emit('uploaded')
-    }
-    files.value = failedFileItems
-    if (!failedFileItems.length) {
-      resetForm()
-      emit('update:visible', false)
-    }
+    await mysqlApi.uploadDocuments(files.value, libraryId.value)
+    emit('uploaded')
+    resetForm()
+    emit('update:visible', false)
+  } catch (error) {
+    uploadError.value = error instanceof Error ? error.message : '上传失败'
   } finally {
     uploading.value = false
   }
@@ -137,8 +122,14 @@ async function upload() {
 watch(
   () => props.visible,
   (visible) => {
-    if (!visible && !uploading.value) resetForm()
+    if (visible) {
+      libraryId.value = props.initialLibraryId
+      uploadError.value = ''
+      return
+    }
+    if (!uploading.value) resetForm()
   },
+  { immediate: true },
 )
 </script>
 
@@ -170,6 +161,7 @@ watch(
         multiple
         @change="selectFiles"
       />
+      <p class="upload-supported-hint">当前仅支持 PDF 和 MD 类型文件。</p>
       <div class="upload-selector-row">
         <t-button variant="outline" :disabled="uploading" @click="openFileSelector">
           选择文件
@@ -199,3 +191,15 @@ watch(
     </div>
   </t-dialog>
 </template>
+
+<style scoped>
+.upload-file-list { display: grid; max-height: 180px; gap: 6px; overflow-y: auto; }
+.upload-file-input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.upload-selector-row { display: flex; min-width: 0; align-items: center; gap: 10px; }
+.upload-selection-summary { min-width: 0; overflow: hidden; color: #6b7280; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.upload-form-hint { margin: 0; color: #2563eb; font-size: 12px; line-height: 1.5; }
+.upload-form-hint--error { color: #dc2626; }
+.upload-file-item { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 4px; background: #f8fafc; }
+.upload-file-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-supported-hint { margin: -2px 0 4px; color: #64748b; font-size: 11px; }
+</style>

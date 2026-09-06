@@ -9,6 +9,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { CheckCircleIcon, ChevronDownIcon, ChevronRightIcon } from 'tdesign-icons-vue-next'
 import { mysqlApi, type Permission } from '../../../api/mysql'
+import { PAGINATION } from '../../../constants'
 
 const emit = defineEmits<{
   (event: 'update-counts', counts: { permissions: number }): void
@@ -19,6 +20,8 @@ const expandedParentIds = ref<number[]>([])
 const loading = ref(false)
 const savingPermissionId = ref<number>()
 const errorMessage = ref('')
+const tablePage = ref(1)
+const tablePageSize = ref<number>(PAGINATION.PAGE_SIZE)
 
 const parentPermissions = computed(() => permissions.value.filter((permission) => permission.parent_id === null))
 // NOTE: 子权限默认收起，避免注册表较大时影响日常查找与角色分配。
@@ -34,6 +37,18 @@ const visiblePermissions = computed(() => {
     ...(expandedParentIds.value.includes(parent.id) ? childrenByParent.get(parent.id) || [] : []),
   ])
 })
+
+const tablePagination = computed(() => ({
+  current: tablePage.value,
+  pageSize: tablePageSize.value,
+  total: visiblePermissions.value.length,
+  pageSizeOptions: [...PAGINATION.PAGE_SIZES],
+}))
+
+function handlePageChange(pageInfo: { current: number; pageSize: number }) {
+  tablePage.value = pageInfo.current
+  tablePageSize.value = pageInfo.pageSize
+}
 
 const columns = [
   { colKey: 'name', title: '权限名称' },
@@ -81,6 +96,7 @@ async function loadPermissions() {
   try {
     permissions.value = await mysqlApi.listPermissions()
     expandedParentIds.value = []
+    tablePage.value = 1
     emit('update-counts', { permissions: permissions.value.length })
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '权限数据加载失败'
@@ -111,7 +127,7 @@ onMounted(() => {
     <div v-if="loading" class="admin-loading">正在加载权限数据...</div>
 
     <div class="panel table-panel">
-      <t-table :data="visiblePermissions" :columns="columns" row-key="id">
+      <t-table :data="visiblePermissions" :columns="columns" row-key="id" :pagination="tablePagination" @page-change="handlePageChange">
         <template #name="{ row }">
           <div class="permission-name" :class="{ 'permission-name--child': !isParent(row) }">
             <t-button
@@ -155,7 +171,8 @@ onMounted(() => {
             </t-button>
           </div>
         </template>
-      </t-table>
+              <template #totalContent><span class="table-pagination-total">共 {{ visiblePermissions.length }} 条数据</span></template>
+</t-table>
     </div>
   </section>
 </template>

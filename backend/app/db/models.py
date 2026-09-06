@@ -136,9 +136,18 @@ class Library(TimestampMixin, SoftDeleteMixin, Base):
     status: Mapped[str] = mapped_column(String(20), default="active", server_default="active", nullable=False)
     document_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", ondelete="SET NULL"), nullable=True)
+    entity_recognition_mode: Mapped[str] = mapped_column(String(20), default="disabled", server_default="disabled", nullable=False)
+    allowed_file_types: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    max_file_size_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_document_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_upload_file_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chunking_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    visibility: Mapped[str] = mapped_column(String(20), default="private", server_default="private", nullable=False)
+    deleted_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     documents: Mapped[list["Document"]] = relationship(back_populates="library")
     members: Mapped[list["LibraryMember"]] = relationship(back_populates="library")
+    import_tasks: Mapped[list["ImportTask"]] = relationship(back_populates="library")
 
 
 class LibraryMember(Base):
@@ -168,13 +177,15 @@ class Document(TimestampMixin, SoftDeleteMixin, Base):
     file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     file_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
-    # uploaded、processing、published、failed、archived 驱动文档生命周期。
+    # uploaded、processing、ready、failed、deleted 驱动文档生命周期。
     status: Mapped[str] = mapped_column(String(20), default="uploaded", server_default="uploaded", nullable=False)
     parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", ondelete="SET NULL"), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     library: Mapped[Library] = relationship(back_populates="documents")
     chunks: Mapped[list["DocumentChunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+    import_tasks: Mapped[list["ImportTask"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
 
 class DocumentChunk(Base):
@@ -194,6 +205,30 @@ class DocumentChunk(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     document: Mapped[Document] = relationship(back_populates="chunks")
 
+
+class ImportTask(TimestampMixin, Base):
+    """持久化文档导入任务，记录处理状态、进度和配置快照。"""
+    __tablename__ = "kb_import_task"
+    __table_args__ = (
+        Index("ix_kb_import_task_library_status", "library_id", "status"),
+        Index("ix_kb_import_task_document_created", "document_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    library_id: Mapped[int] = mapped_column(ForeignKey("kb_library.id", ondelete="RESTRICT"), nullable=False)
+    document_id: Mapped[int] = mapped_column(ForeignKey("kb_document.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="queued", server_default="queued", nullable=False)
+    current_step: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    config_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    entity_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    chunk_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", ondelete="SET NULL"), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    library: Mapped[Library] = relationship(back_populates="import_tasks")
+    document: Mapped[Document] = relationship(back_populates="import_tasks")
 
 class Tag(TimestampMixin, Base):
     """可复用的文档标签模型。"""

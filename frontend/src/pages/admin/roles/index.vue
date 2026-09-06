@@ -9,6 +9,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { AddIcon } from 'tdesign-icons-vue-next'
 import { mysqlApi, type Permission, type Role } from '../../../api/mysql'
+import { PAGINATION } from '../../../constants'
 import { isSystemAdminRole } from '../shared/formatters'
 
 type RoleForm = {
@@ -43,6 +44,8 @@ const showEditDialog = ref(false)
 const editingRoleId = ref<number>()
 const newRole = ref<RoleForm>(createNewRole())
 const editRole = ref<Omit<RoleForm, 'code'>>(createEditRole())
+const tablePage = ref(1)
+const tablePageSize = ref<number>(PAGINATION.PAGE_SIZE)
 
 const columns = [
   { colKey: 'name', title: '角色名称' },
@@ -61,6 +64,18 @@ const permissionGroups = computed<PermissionGroup[]>(() =>
       children: permissions.value.filter((permission) => permission.parent_id === parent.id),
     })),
 )
+
+const tablePagination = computed(() => ({
+  current: tablePage.value,
+  pageSize: tablePageSize.value,
+  total: roles.value.length,
+  pageSizeOptions: [...PAGINATION.PAGE_SIZES],
+}))
+
+function handlePageChange(pageInfo: { current: number; pageSize: number }) {
+  tablePage.value = pageInfo.current
+  tablePageSize.value = pageInfo.pageSize
+}
 
 function createNewRole(): RoleForm {
   return { code: '', name: '', description: '', permission_codes: [], status: 'active' }
@@ -182,7 +197,7 @@ async function loadRoles() {
       mysqlApi.listRoles(showDeleted.value ? 'include_deleted=true' : ''),
       mysqlApi.listPermissions(),
     ])
-    roles.value = roleData
+    roles.value = roleData.sort((left, right) => Number(isSystemAdminRole(right.code)) - Number(isSystemAdminRole(left.code)))
     permissions.value = permissionData
     emit('update-counts', { roles: roles.value.length, permissions: permissions.value.length })
   } catch (error) {
@@ -267,7 +282,7 @@ onMounted(() => {
     </div>
 
     <div class="table-filter-row">
-      <t-checkbox v-model="showDeleted" @change="loadRoles">显示已删除</t-checkbox>
+      <t-checkbox v-model="showDeleted" @change="tablePage = 1; loadRoles()">显示已删除</t-checkbox>
     </div>
 
     <div v-if="errorMessage" class="admin-error">
@@ -277,7 +292,7 @@ onMounted(() => {
     <div v-if="loading" class="admin-loading">正在加载角色数据...</div>
 
     <div class="panel table-panel">
-      <t-table :data="roles" :columns="columns" row-key="id">
+      <t-table :data="roles" :columns="columns" row-key="id" :pagination="tablePagination" @page-change="handlePageChange">
         <template #name="{ row }">
           <div class="role-name">
             <div class="role-symbol">{{ row.name.slice(0, 1) }}</div>
@@ -323,7 +338,8 @@ onMounted(() => {
           </div>
           <span v-else class="protected-label">系统内置</span>
         </template>
-      </t-table>
+              <template #totalContent><span class="table-pagination-total">共 {{ roles.length }} 条数据</span></template>
+</t-table>
     </div>
 
     <t-dialog
@@ -425,5 +441,23 @@ onMounted(() => {
   gap: 8px;
   padding: 8px 0 0 28px;
 }
-</style>
 
+.role-name {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.role-symbol {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  color: #2563eb;
+  background: #eff6ff;
+  font-size: 11px;
+  font-weight: 600;
+}
+.protected-label { display: inline-flex; align-items: center; min-height: 28px; color: #9ca3af; font-size: 11px; font-weight: 400; line-height: 1.4; white-space: nowrap; }
+</style>

@@ -6,16 +6,24 @@
  * @BusinessRule: 敏感配置仅可写入，页面绝不回显明文；访问权限由后端限定为系统管理员。
 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { RefreshIcon } from 'tdesign-icons-vue-next'
 import { mysqlApi, type SystemSetting } from '../../../api/mysql'
+import { useRequest } from '../../../composables'
 
 const settings = ref<SystemSetting[]>([])
 const drafts = ref<Record<string, string>>({})
-const loading = ref(false)
 const savingKey = ref('')
-const errorMessage = ref('')
 const successMessage = ref('')
+const saveError = ref('')
+const settingsRequest = useRequest(async () => {
+  const result = await mysqlApi.listSettings()
+  settings.value = result
+  drafts.value = Object.fromEntries(result.filter((item) => !item.is_sensitive).map((item) => [item.key, item.value || '']))
+  return result
+}, { immediate: true })
+const loading = settingsRequest.loading
+const errorMessage = computed(() => saveError.value || settingsRequest.error.value?.message || '')
 
 const categoryNames: Record<string, string> = {
   model: '模型服务',
@@ -35,22 +43,17 @@ function displayValue(item: SystemSetting) {
 }
 
 async function loadSettings() {
-  loading.value = true
-  errorMessage.value = ''
   try {
-    settings.value = await mysqlApi.listSettings()
-    drafts.value = Object.fromEntries(settings.value.filter((item) => !item.is_sensitive).map((item) => [item.key, item.value || '']))
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '系统设置加载失败'
-  } finally {
-    loading.value = false
+    await settingsRequest.execute()
+  } catch {
+    // Error is exposed through the composable for the template.
   }
 }
 
 /** 保存单项配置；敏感值保存后立即清空前端草稿。 */
 async function saveSetting(item: SystemSetting) {
   savingKey.value = item.key
-  errorMessage.value = ''
+  saveError.value = ''
   successMessage.value = ''
   try {
     const updated = await mysqlApi.updateSetting(item.key, drafts.value[item.key] ?? '')
@@ -59,13 +62,12 @@ async function saveSetting(item: SystemSetting) {
     if (item.is_sensitive) drafts.value[item.key] = ''
     successMessage.value = item.is_sensitive ? '敏感配置已安全更新' : '配置已保存'
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '保存系统设置失败'
+    saveError.value = error instanceof Error ? error.message : '保存系统设置失败'
   } finally {
     savingKey.value = ''
   }
 }
 
-onMounted(() => { void loadSettings() })
 </script>
 
 <template>

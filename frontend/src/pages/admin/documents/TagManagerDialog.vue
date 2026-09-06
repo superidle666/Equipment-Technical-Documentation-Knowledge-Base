@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { mysqlApi, type Tag } from '../../../api/mysql'
+import { PAGINATION } from '../../../constants'
 
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{
@@ -19,11 +20,20 @@ const loading = ref(false)
 const saving = ref(false)
 const deletingId = ref<number>()
 const errorMessage = ref('')
+const tagPage = ref(1)
+const tagPageSize = ref<number>(PAGINATION.PAGE_SIZE)
 const filteredTags = computed(() => {
   const query = search.value.trim().toLowerCase()
   if (!query) return tags.value
   return tags.value.filter((tag) => tag.name.toLowerCase().includes(query))
 })
+
+const visibleTags = computed(() => filteredTags.value.slice((tagPage.value - 1) * tagPageSize.value, tagPage.value * tagPageSize.value))
+
+function handleTagPageChange(pageInfo: { current: number; pageSize: number }) {
+  tagPage.value = pageInfo.current
+  tagPageSize.value = pageInfo.pageSize
+}
 
 async function loadTags() {
   loading.value = true
@@ -109,9 +119,14 @@ async function deleteTag(tag: Tag) {
   }
 }
 
+watch([search, filteredTags], () => {
+  tagPage.value = 1
+}, { deep: true })
+
 watch(() => props.visible, (visible) => {
   if (visible) {
     search.value = ''
+    tagPage.value = 1
     cancelEdit()
     errorMessage.value = ''
     void loadTags()
@@ -135,7 +150,7 @@ watch(() => props.visible, (visible) => {
     <t-input v-model="search" placeholder="搜索标签" clearable class="tag-search-input" />
     <div v-if="loading" class="admin-loading">正在加载标签...</div>
     <div v-else class="tag-manager-list">
-      <div v-for="tag in filteredTags" :key="tag.id" class="tag-manager-item">
+      <div v-for="tag in visibleTags" :key="tag.id" class="tag-manager-item">
         <t-input
           v-if="editingId === tag.id"
           v-model="editingName"
@@ -163,6 +178,29 @@ watch(() => props.visible, (visible) => {
         </div>
       </div>
       <p v-if="!filteredTags.length" class="empty-state">暂无匹配标签</p>
+      <div v-if="filteredTags.length" class="dialog-pagination">
+        <t-pagination
+          :current="tagPage"
+          :page-size="tagPageSize"
+          :total="filteredTags.length"
+          :page-size-options="[5, 10, 20, 50]"
+          @change="handleTagPageChange"
+        />
+      </div>
     </div>
   </t-dialog>
 </template>
+
+<style scoped>
+.tag-create-row { display: flex; gap: 10px; margin-bottom: 14px; }
+.tag-create-row .t-input { min-width: 0; flex: 1; }
+.tag-search-input { margin-bottom: 14px; }
+.tag-manager-list { display: grid; gap: 8px; max-height: min(48vh, 420px); overflow-y: auto; padding: 2px; }
+.tag-manager-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-height: 40px; padding: 10px 12px; border-bottom: 1px solid #f1f5f9; }
+.tag-manager-item:last-child { border-bottom: 0; }
+.tag-manager-actions { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.tag-edit-input { min-width: 0; flex: 1; }
+.empty-state { color: #9ca3af; font-size: 12px; }
+.dialog-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }
+@media (max-width: 560px) { .dialog-pagination { align-items: flex-start; flex-direction: column; } }
+</style>

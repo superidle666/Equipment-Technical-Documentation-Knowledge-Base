@@ -1,0 +1,35 @@
+[
+  {
+    "title": "# 使用说明",
+    "content": "# 使用说明\n\n这里是正文。\n\n| 型号 | 电压 |\n| --- | --- |\n| A1 | 220V |",
+    "file_title": "manual",
+    "title_path": [
+      "使用说明"
+    ],
+    "parent_title": "manual",
+    "source_page": 3,
+    "content_block_orders": [
+      0,
+      1,
+      2
+    ],
+    "content_block_types": [
+      "heading",
+      "paragraph",
+      "table"
+    ],
+    "chunk_type": "heading,paragraph,table",
+    "source_kind": "markdown",
+    "image_sources": [],
+    "image_contexts": [],
+    "image_metadata": [],
+    "chunk_index": 0,
+    "knowledge_base_id": 1,
+    "library_id": 1,
+    "document_id": 2,
+    "document_version": 1,
+    "file_name": "manual.md",
+    "item_name": "",
+    "entity_recognition_mode": "disabled"
+  }
+]

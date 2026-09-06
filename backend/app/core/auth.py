@@ -157,6 +157,24 @@ async def get_current_user(
     return to_authenticated_user(user)
 
 
+async def get_optional_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    session: AsyncSession = Depends(get_db),
+) -> AuthenticatedUser | None:
+    """Resolve a logged-in user when a token is supplied, otherwise allow anonymous access."""
+
+    if credentials is None:
+        return None
+    try:
+        claims = decode_token(credentials.credentials, "access")
+    except TokenValidationError as exc:
+        raise HTTPException(401, "访问令牌无效或已过期", headers={"WWW-Authenticate": "Bearer"}) from exc
+    user = await load_active_user(session, int(claims["sub"]))
+    if user is None:
+        raise HTTPException(401, "账号已停用、锁定或删除")
+    return to_authenticated_user(user)
+
+
 def _management_permission(request: Request) -> str:
     """Map every MySQL management route to a permission registry code."""
 
@@ -172,6 +190,8 @@ def _management_permission(request: Request) -> str:
         if "/members" in path:
             return "library:read" if method == "GET" else "library:modify"
         return {"GET": "library:read", "POST": "library:create", "PATCH": "library:modify", "DELETE": "library:delete"}[method]
+    if path.startswith("/import-tasks"):
+        return "document:view" if method == "GET" else "document:modify"
     if path.startswith("/documents"):
         if path.endswith("/chunks"):
             return "document:view"

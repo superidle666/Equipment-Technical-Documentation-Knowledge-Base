@@ -1,74 +1,79 @@
-# knowledge/processor/import_processor/state.py
+﻿"""导入流程状态类型定义。"""
 
-"""
-导入流程状态类型定义
+from copy import deepcopy
+import asyncio
+from typing import Any, Literal, TypedDict
 
-定义完整的状态结构和辅助函数
-"""
+from processor.import_processor.content_blocks import ContentBlock
 
-from typing import TypedDict, List
-import copy
+EntityRecognitionMode = Literal["disabled", "optional", "required"]
 
 
-class ImportGraphState(TypedDict):
-    """
-    导入流程图状态
+class ImportGraphState(TypedDict, total=False):
+    """导入流程在 LangGraph 节点之间传递的状态。"""
 
-    包含整个导入流程中传递的所有数据。
-    使用 total=False 表示所有字段都是可选的。
-    """
+    task_id: str | int
+    import_task_id: int
+    knowledge_base_id: int
+    library_id: int
+    document_id: int
+    document_version: int
 
-    # ==================== 任务标识 ====================
-    task_id: str                    # 任务 ID，用于任务追踪
+    is_md_read_enabled: bool
+    is_pdf_read_enabled: bool
 
-    # ==================== 控制标志 ====================
-    is_md_read_enabled: bool        # 是否启用 MD 读取
-    is_pdf_read_enabled: bool       # 是否启用 PDF 读取
+    import_file_path: str
+    file_dir: str
+    pdf_path: str
+    md_path: str
 
-    # ==================== 路径信息 ====================
-    import_file_path: str           # 导入文件路径（原始输入）
-    file_dir: str                   # 导入(出)文件目录
-    pdf_path: str                   # PDF 文件路径
-    md_path: str                    # 转换后 Markdown 文件路径
+    file_title: str
+    item_name: str
+    item_names: list[str]
+    entity_recognition_mode: EntityRecognitionMode
+    config_snapshot: dict[str, Any]
 
-    # ==================== 文件信息 ====================
-    file_title: str                 # 文件标题（不含扩展名）
-    item_name: str                  # 识别出的商品/产品名称
+    md_content: str
+    ocr_content: str
+    content_blocks: list[ContentBlock]
+    image_metadata: list[dict[str, Any]]
+    chunks: list[dict[str, Any]]
 
-    # ==================== 处理中间数据 ====================
-    md_content: str                 # Markdown 文档内容
-    chunks: List                    # 文档切片列表
+    current_step: str
+    progress: int
+    cancel_requested: bool
+    database_event_loop: asyncio.AbstractEventLoop
 
 
 GRAPH_DEFAULT_STATE: ImportGraphState = {
-
     "task_id": "",
-
+    "import_task_id": 0,
+    "knowledge_base_id": 0,
+    "library_id": 0,
+    "document_id": 0,
+    "document_version": 1,
     "is_pdf_read_enabled": False,
-
     "is_md_read_enabled": False,
-
-    "file_dir": "",
-
     "import_file_path": "",
-
+    "file_dir": "",
     "pdf_path": "",
-
     "md_path": "",
-
     "file_title": "",
-
-    "md_content": "",
-
-    "chunks": [],
-
     "item_name": "",
-
+    "item_names": [],
+    "entity_recognition_mode": "disabled",
+    "config_snapshot": {},
+    "md_content": "",
+    "ocr_content": "",
+    "content_blocks": [],
+    "image_metadata": [],
+    "chunks": [],
+    "current_step": "",
+    "progress": 0,
+    "cancel_requested": False,
 }
 
+
 def get_default_state() -> ImportGraphState:
-    """
-    获取默认状态副本
-    :return: 状态副本（避免全局污染）
-    """
-    return copy.deepcopy(GRAPH_DEFAULT_STATE)
+    """返回不会污染全局默认值的导入状态副本。"""
+    return deepcopy(GRAPH_DEFAULT_STATE)

@@ -1,12 +1,15 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { hasAccessToken } from '../api/auth'
-import UserView from '../UserView.vue'
+import { useUserStore } from '../store/modules/user'
+import pinia from '../store'
+import UserPage from '../pages/user/index.vue'
+import UserLoginPage from '../pages/user/login.vue'
 import AdminView from '../pages/admin/index.vue'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', name: 'user', component: UserView },
+    { path: '/', name: 'user', component: UserPage },
+    { path: '/login', name: 'user-login', component: UserLoginPage },
     { path: '/admin/login', name: 'admin-login', component: AdminView },
     { path: '/admin', name: 'admin', component: AdminView, meta: { requiresAuth: true } },
     { path: '/:pathMatch(.*)*', redirect: '/' },
@@ -14,8 +17,10 @@ const router = createRouter({
 })
 
 router.beforeEach((to) => {
-  if (to.meta.requiresAuth && !hasAccessToken()) return { name: 'admin-login' }
-  if (to.name === 'admin-login' && hasAccessToken()) return { name: 'admin' }
+  const isLoggedIn = useUserStore(pinia).isLoggedIn
+  if (to.meta.requiresAuth && !isLoggedIn) return { name: 'admin-login' }
+  if (to.name === 'admin-login' && isLoggedIn) return { name: 'admin' }
+  if (to.name === 'user-login' && isLoggedIn) return { name: 'user' }
   return true
 })
 
