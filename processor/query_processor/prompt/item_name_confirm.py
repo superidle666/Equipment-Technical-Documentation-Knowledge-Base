@@ -1,4 +1,10 @@
-# processor/query_processor/prompt/item_name_confirm.py
+"""
+商品或设备实体确认提示词模板。
+
+@FilePath: processor/query_processor/prompt/item_name_confirm.py
+@Date: 2026-09-07
+@Description: 指导模型从当前问题和历史会话中提取实体并改写独立查询。
+"""
 
 ITEM_NAME_EXTRACT_SYSTEM_PROMPT = "你是一个专业的客服助手，擅长理解用户意图和提取关键信息。"
 

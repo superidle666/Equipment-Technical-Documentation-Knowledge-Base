@@ -7,20 +7,23 @@
 <script setup lang="ts">
 import {
   ChevronRightIcon,
+  LightbulbIcon,
   MenuIcon,
+  MoonIcon,
   LogoutIcon,
 } from 'tdesign-icons-vue-next'
 
-const props = defineProps<{ title: string; displayName: string; roleLabel: string }>()
+const props = defineProps<{ title: string; displayName: string; roleLabel: string; darkMode: boolean }>()
 
 const emit = defineEmits<{
   (event: 'open-menu'): void
   (event: 'logout'): void
+  (event: 'toggle-theme'): void
 }>()
 </script>
 
 <template>
-  <header class="admin-topbar">
+  <header class="admin-topbar" :class="{ 'is-dark': props.darkMode }">
     <div class="admin-top-left">
       <t-button
         variant="text"
@@ -45,6 +48,12 @@ const emit = defineEmits<{
         <span>{{ props.roleLabel }}</span>
       </div>
       <div class="avatar admin-avatar">{{ props.displayName.slice(0, 1) }}</div>
+      <t-tooltip :content="props.darkMode ? '切换浅色模式' : '切换夜间模式'">
+        <t-button variant="text" shape="square" class="admin-top-theme" :aria-label="props.darkMode ? '切换浅色模式' : '切换夜间模式'" @click="emit('toggle-theme')">
+          <LightbulbIcon v-if="props.darkMode" />
+          <MoonIcon v-else />
+        </t-button>
+      </t-tooltip>
       <t-tooltip content="退出登录">
         <t-button
           variant="text"
@@ -71,6 +80,7 @@ const emit = defineEmits<{
   align-items: center;
   justify-content: space-between;
 }
+.admin-topbar.is-dark { background: #1f2937; border-color: #374151; color: #f3f4f6; }
 .admin-top-left,
 .admin-top-right { display: flex; align-items: center; gap: 10px; }
 .admin-top-left svg { width: 15px; color: #9ca3af; }
@@ -84,6 +94,8 @@ const emit = defineEmits<{
 .admin-top-logout { color: #6b7280; }
 .admin-top-logout:hover { color: #dc2626; background: #fef2f2; }
 .admin-top-logout svg { width: 17px; }
+.admin-top-theme { color: #6b7280; }
+.admin-top-theme:hover { color: #2563eb; background: #eff6ff; }
 .admin-mobile-menu { display: none; }
 @media (max-width: 760px) {
   .admin-topbar { padding: 0 16px; }

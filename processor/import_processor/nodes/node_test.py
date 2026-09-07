@@ -1,3 +1,11 @@
+"""
+文档导入节点测试样例。
+
+@FilePath: processor/import_processor/nodes/node_test.py
+@Date: 2026-09-07
+@Description: 验证导入节点基类、状态传递和步骤日志机制，不参与生产导入流程。
+"""
+
 import logging
 from typing import Dict
 

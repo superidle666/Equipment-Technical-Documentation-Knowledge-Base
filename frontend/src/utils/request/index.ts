@@ -1,3 +1,5 @@
+/** HTTP 请求封装，统一处理 API 地址、认证令牌和错误信息。 */
+
 import { useUserStore } from '../../store/modules/user'
 import { authenticatedFetch, getAccessToken } from '../../api/auth'
 

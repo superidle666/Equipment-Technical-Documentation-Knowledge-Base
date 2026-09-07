@@ -31,11 +31,21 @@ router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
 
 
 def _token_hash(token: str) -> str:
+    """生成刷新令牌的 SHA-256 摘要。
+
+    Note:
+        数据库只保存摘要，不保存可被直接复用的原始令牌。
+    """
     import hashlib
     return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _user_out(user: AuthenticatedUser) -> dict:
+    """构造认证接口返回的最小用户信息。
+
+    Note:
+        仅暴露前端鉴权所需的角色和权限，不返回密码等内部字段。
+    """
     return {
         "id": user.id, "username": user.username, "display_name": user.display_name,
         "avatar_url": user.avatar_url, "roles": list(user.roles),
@@ -44,6 +54,11 @@ def _user_out(user: AuthenticatedUser) -> dict:
 
 
 async def _issue_pair(session: AsyncSession, user: User) -> tuple[dict, AuthRefreshToken]:
+    """签发访问令牌与刷新令牌，并登记刷新令牌摘要。
+
+    Note:
+        调用方必须在同一事务中提交令牌记录，避免返回成功但服务端无法续期。
+    """
     now = datetime.now(timezone.utc)
     access_expiry = now + timedelta(minutes=settings.jwt_access_token_minutes)
     refresh_expiry = now + timedelta(days=settings.jwt_refresh_token_days)
@@ -66,6 +81,19 @@ async def _issue_pair(session: AsyncSession, user: User) -> tuple[dict, AuthRefr
 # 登录成功后在同一事务内更新最近登录时间并写审计日志，避免出现“已登录但无日志”的不一致记录。
 @router.post("/login", response_model=TokenPairOut)
 async def login(payload: LoginRequest, request: Request, session: AsyncSession = Depends(get_db)):
+    """管理员登录接口。
+
+    Args:
+        payload: 用户名和密码。
+        request: 当前请求，用于记录客户端地址。
+        session: 数据库会话。
+    Returns:
+        TokenPairOut: 访问令牌、刷新令牌及用户权限。
+    Raises:
+        HTTPException: 账号密码错误返回 401；账号停用、锁定或删除返回 403。
+    Note:
+        最近登录时间、刷新令牌和登录审计日志必须在同一事务中写入。
+    """
     result = await session.execute(
         select(User).options(selectinload(User.roles).selectinload(Role.permissions)).where(User.username == payload.username)
     )
@@ -85,6 +113,18 @@ async def login(payload: LoginRequest, request: Request, session: AsyncSession =
 # NOTE: 刷新令牌采用轮换策略，旧令牌在签发新令牌后必须立即撤销，降低泄露后的可用窗口。
 @router.post("/refresh", response_model=TokenPairOut)
 async def refresh(payload: RefreshTokenRequest, session: AsyncSession = Depends(get_db)):
+    """轮换刷新令牌并续期管理会话。
+
+    Args:
+        payload: 当前刷新令牌。
+        session: 数据库会话。
+    Returns:
+        TokenPairOut: 新的访问令牌和刷新令牌。
+    Raises:
+        HTTPException: 令牌签名、摘要、有效期、撤销状态或账号状态不合法时返回 401。
+    Note:
+        旧刷新令牌在新令牌签发后立即撤销，降低泄露令牌的可用窗口。
+    """
     try:
         claims = decode_token(payload.refresh_token, "refresh")
     except TokenValidationError as exc:
@@ -112,6 +152,18 @@ async def logout(
     current_user: AuthenticatedUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
+    """退出当前管理会话。
+
+    Args:
+        payload: 可选刷新令牌。
+        request: 当前请求，用于记录客户端地址。
+        current_user: 已认证的操作用户。
+        session: 数据库会话。
+    Returns:
+        None: 成功或令牌不可用时均返回 204。
+    Note:
+        只能撤销属于当前用户的刷新令牌；无效令牌按幂等退出处理。
+    """
     if not payload.refresh_token:
         return
     try:
@@ -129,5 +181,12 @@ async def logout(
 
 @router.get("/me", response_model=AuthUserOut)
 async def me(current_user: AuthenticatedUser = Depends(get_current_user)):
+    """获取当前认证用户的授权上下文。
+
+    Args:
+        current_user: 已通过访问令牌校验的用户。
+    Returns:
+        AuthUserOut: 前端路由和功能权限控制所需的用户、角色与权限信息。
+    """
     return _user_out(current_user)
 

@@ -358,9 +358,11 @@ class QueryResponse(BaseModel):
     """知识库问答结果，包含答案和可追溯来源。"""
 
     library_id: int
+    session_id: str | None = None
     query: str
     answer: str
     sources: list[QuerySourceOut] = Field(default_factory=list)
+    image_urls: list[str] = Field(default_factory=list)
 
 
 class QuerySessionOut(BaseModel):
@@ -373,6 +375,26 @@ class QuerySessionOut(BaseModel):
     updated_at: float
 
 
+class QuerySessionCreate(BaseModel):
+    """创建登录用户的新会话。"""
+
+    library_id: int
+    title: str = Field(default="新建技术咨询", min_length=1, max_length=64)
+
+class QuerySessionUpdate(BaseModel):
+    """更新历史会话标题。"""
+
+    title: str = Field(min_length=1, max_length=64)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        title = value.strip()
+        if not title:
+            raise ValueError("会话名称不能为空")
+        return title
+
+
 class QueryChatMessageOut(BaseModel):
     """用于恢复用户端历史会话的单条消息。"""
 
@@ -381,6 +403,7 @@ class QueryChatMessageOut(BaseModel):
     content: str
     created_at: float
     sources: list[QuerySourceOut] = Field(default_factory=list)
+    image_urls: list[str] = Field(default_factory=list)
 
 
 class QuerySessionMessagesOut(BaseModel):

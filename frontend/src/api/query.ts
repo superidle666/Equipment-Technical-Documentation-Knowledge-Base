@@ -1,3 +1,5 @@
+/** 用户端知识库列表、连续会话、历史消息和流式问答接口。 */
+
 import request from '../utils/request'
 import { authenticatedFetch } from './auth'
 
@@ -25,9 +27,11 @@ export type QuerySource = {
 
 export type QueryResponse = {
   library_id: number
+  session_id: string | null
   query: string
   answer: string
   sources: QuerySource[]
+  image_urls: string[]
 }
 
 export type QuerySession = {
@@ -44,6 +48,7 @@ export type QueryChatMessage = {
   content: string
   created_at: number
   sources: QuerySource[]
+  image_urls: string[]
 }
 
 export type QuerySessionMessages = {
@@ -65,12 +70,31 @@ export function listQueryLibraries() {
   return request<QueryLibrary[]>('/api/v1/query/libraries')
 }
 
+export function createQuerySession(libraryId: number, title = "新建技术咨询") {
+  return request<QuerySession>('/api/v1/query/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ library_id: libraryId, title }),
+  })
+}
 export function listQuerySessions(libraryId: number) {
   return request<QuerySession[]>(`/api/v1/query/sessions?library_id=${encodeURIComponent(libraryId)}`)
 }
 
 export function getQuerySessionMessages(sessionId: string) {
   return request<QuerySessionMessages>(`/api/v1/query/sessions/${encodeURIComponent(sessionId)}/messages`)
+}
+
+export function renameQuerySession(sessionId: string, title: string) {
+  return request<QuerySession>(`/api/v1/query/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title }),
+  })
+}
+
+export function deleteQuerySession(sessionId: string) {
+  return request<{ deleted: boolean }>(`/api/v1/query/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  })
 }
 
 export function queryKnowledgeBase(payload: QueryRequest, signal?: AbortSignal) {

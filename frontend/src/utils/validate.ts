@@ -1,3 +1,5 @@
+/** 用户输入校验工具。 */
+
 import { REGEX } from '../constants'
 
 export function isEmail(value: string): boolean {

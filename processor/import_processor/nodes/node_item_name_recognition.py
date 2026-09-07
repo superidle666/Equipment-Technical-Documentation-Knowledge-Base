@@ -1,4 +1,10 @@
-# processor/import_processor/nodes/node_item_name_recognition.py
+"""
+文档主体识别节点。
+
+@FilePath: processor/import_processor/nodes/node_item_name_recognition.py
+@Date: 2026-09-07
+@Description: 从导入内容中识别商品或设备主体，并将实体信息写入知识库元数据。
+"""
 import json
 import logging
 from typing import List, Dict, Tuple

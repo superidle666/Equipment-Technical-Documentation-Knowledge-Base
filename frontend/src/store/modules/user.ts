@@ -1,3 +1,5 @@
+/** 用户认证状态：登录用户信息、令牌生命周期和权限信息。 */
+
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import {

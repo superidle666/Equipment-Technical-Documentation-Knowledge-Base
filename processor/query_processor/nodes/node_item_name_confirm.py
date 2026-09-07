@@ -1,4 +1,10 @@
-# processor/query_processor/nodes/node_item_name_confirm.py
+"""
+问答实体确认节点。
+
+@FilePath: processor/query_processor/nodes/node_item_name_confirm.py
+@Date: 2026-09-07
+@Description: 结合当前问题和历史会话确认用户询问的商品或设备，并生成独立查询。
+"""
 
 import json
 from typing import Tuple, Dict, List

@@ -1,3 +1,5 @@
+/** 管理端表格查询、分页、筛选和刷新逻辑。 */
+
 import { computed, ref, type Ref } from 'vue'
 import { usePagination, type PaginationFetcher, type UsePaginationOptions } from './usePagination'
 

@@ -1,4 +1,10 @@
-# processor/query_processor/nodes/node_search_embedding_hyde.py
+"""
+HyDE 向量检索节点。
+
+@FilePath: processor/query_processor/nodes/node_search_embedding_hyde.py
+@Date: 2026-09-07
+@Description: 先生成假设性答案，再将其向量化用于补充知识库召回。
+"""
 from config.milvus_config import milvus_config
 from processor.query_processor.base import NodeBase
 from processor.query_processor.prompt.search_embedding_hyde import HYDE_PROMPT

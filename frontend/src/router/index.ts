@@ -1,3 +1,5 @@
+/** 前端路由配置和页面访问控制。 */
+
 import { createRouter, createWebHistory } from 'vue-router'
 import { useUserStore } from '../store/modules/user'
 import pinia from '../store'

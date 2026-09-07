@@ -89,7 +89,7 @@ class KBQueryWorkflow:
 
     @staticmethod
     def _route_after_sources(state: QueryGraphState) -> str:
-        return "finish" if not state.get("sources") else "answer"
+        return "answer"
 
     def compile(self):
         if self._compiled_app is None:

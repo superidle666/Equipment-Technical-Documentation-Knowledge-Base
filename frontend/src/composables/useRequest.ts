@@ -1,4 +1,6 @@
-﻿import { ref } from 'vue'
+/** 通用异步请求状态管理，统一处理加载、结果、错误和重置。 */
+
+import { ref } from 'vue'
 
 export type RequestExecutor<T, P = void> = (params: P) => Promise<T>
 

@@ -1,4 +1,11 @@
-# processor/query_processor/nodes/node_answer_output.py
+"""
+答案生成与输出节点。
+
+@FilePath: processor/query_processor/nodes/node_answer_output.py
+@Date: 2026-09-07
+@Description: 组装问答提示词、调用模型生成答案、筛选回答引用图片并发送最终结果。
+@BusinessRule: 图片只能返回模型明确引用且来自当前召回内容的 URL。
+"""
 
 import re
 from typing import List, Dict, Tuple
@@ -14,6 +21,7 @@ from utils.sse_utils import push_to_session, SSEEvent
 from utils.task_utils import set_task_result, add_done_task
 
 MAX_CONTEXT_CHARS = 12000
+MAX_HISTORY_CHARS = 3000
 
 class NodeAnswerOutput(NodeBase):
     """
@@ -53,7 +61,11 @@ class NodeAnswerOutput(NodeBase):
 
 
         # 阶段四： 提取图片URL（用于历史记录和前端展示）
-        image_urls = self._extract_images_from_docs(state.get("reranked_docs") or [])
+        image_urls = self._extract_images_from_answer(
+            state.get("answer") or "",
+            state.get("reranked_docs") or [],
+        )
+        state["image_urls"] = image_urls
 
         # 阶段五：把答案写入到mongodb的history中
         if state.get("answer") and state.get("persist_history", True):
@@ -109,14 +121,14 @@ class NodeAnswerOutput(NodeBase):
         question = state.get("rewritten_query") or state.get("original_query", "")
         item_names = state["item_names"]
 
-        # 2. 格式化上下文文档
-        context_str, char_budget = self._format_reranked_docs(
-            state.get("reranked_docs") or [], char_budget
+        # 2. 为历史对话预留独立预算，避免长文档挤掉多轮上下文
+        history_str, _ = self._format_chat_history(
+            state.get("history") or [], MAX_HISTORY_CHARS
         )
 
-        # 3. 格式化历史对话
-        history_str, char_budget = self._format_chat_history(
-            state.get("history") or [], char_budget
+        # 3. 格式化上下文文档
+        context_str, _ = self._format_reranked_docs(
+            state.get("reranked_docs") or [], MAX_CONTEXT_CHARS - MAX_HISTORY_CHARS
         )
 
         # 4. 格式化 Item Names (提问商品)
@@ -317,6 +329,26 @@ class NodeAnswerOutput(NodeBase):
         logger.info(f"图片提取完成，共找到 {len(images)} 张唯一图片: {images}")
         return images
 
+    def _extract_images_from_answer(self, answer: str, docs: list[dict]) -> list[str]:
+        """只返回模型在答案中明确引用、且来自召回内容的图片。"""
+        available_images = set(self._extract_images_from_docs(docs))
+        if not available_images:
+            return []
+
+        image_urls: list[str] = []
+        markdown_pattern = re.compile(r"!\[[^\]]*\]\((https?://[^\s)]+)\)")
+        legacy_pattern = re.compile(r"【图片】\s*([\s\S]*?)$")
+        candidates = markdown_pattern.findall(answer)
+        legacy_block = legacy_pattern.search(answer)
+        if legacy_block:
+            candidates.extend(legacy_block.group(1).splitlines())
+
+        for candidate in candidates:
+            image_url = candidate.strip().rstrip(",.;，。；）")
+            if image_url in available_images and image_url not in image_urls:
+                image_urls.append(image_url)
+        return image_urls
+
     def _step_4_write_history(seld, state: QueryGraphState, image_urls=None) -> QueryGraphState:
         """
         阶段四：把本轮答案写入 MongoDB history。
@@ -361,10 +393,10 @@ if __name__ == "__main__":
 HAK 180 烫金机的操作面板位于机器正前方。
 开启电源后，您需要先设置温度，默认建议设置在 110℃ 左右。
 具体的操作面板布局请参考下图：
-![操作面板布局图](http://192.168.100.100:9000/knowledge-base/upload-images/hak180产品安全手册/048c005b198be5c9fff80ad6a6ba02496f38fa109ec20dbaabde3110f3eb1574.jpg)
+![操作面板布局图](http://127.0.0.1:9000/knowledge-base/upload-images/hak180产品安全手册/048c005b198be5c9fff80ad6a6ba02496f38fa109ec20dbaabde3110f3eb1574.jpg)
 
 如果是进行局部烫金，请调节侧面的旋钮。
-![侧面旋钮细节](http://192.168.100.100:9000/knowledge-base/upload-images/hak180产品安全手册/f77da4df52517fc50b9efb528540e1351dd1a08dce6f801cf08366540f2c59ce.jpg)
+![侧面旋钮细节](http://127.0.0.1:9000/knowledge-base/upload-images/hak180产品安全手册/f77da4df52517fc50b9efb528540e1351dd1a08dce6f801cf08366540f2c59ce.jpg)
 """
         },
         {
@@ -372,7 +404,7 @@ HAK 180 烫金机的操作面板位于机器正前方。
             "source": "web",
             "title": "HAK 180 常见故障排除 - 官网",
             "score": 0.88,
-            "url": "http://192.168.100.100:9000/knowledge-base/upload-images/%E5%8D%8E%E4%B8%BA%E6%93%8E%E4%BA%91G740%E7%94%A8%E6%88%B7%E6%8C%87%E5%8D%97-(KLVG-16Z,Windows11_02,zh-cn)/c28a751c315a89fb5f3b52736a7996b56971c9a260a0e2b850eb5ef18beabf3c.jpg",  # 这是一个直接指向图片的URL（虽然少见，但用于测试提取）
+            "url": "http://127.0.0.1:9000/knowledge-base/upload-images/%E5%8D%8E%E4%B8%BA%E6%93%8E%E4%BA%91G740%E7%94%A8%E6%88%B7%E6%8C%87%E5%8D%97-(KLVG-16Z,Windows11_02,zh-cn)/c28a751c315a89fb5f3b52736a7996b56971c9a260a0e2b850eb5ef18beabf3c.jpg",  # 这是一个直接指向图片的URL（虽然少见，但用于测试提取）
             "content": "如果机器无法加热，请检查保险丝是否熔断..."
         },
         {

@@ -1,4 +1,10 @@
-# processor/import_processor/nodes/node_document_split.py
+"""
+文档切分节点。
+
+@FilePath: processor/import_processor/nodes/node_document_split.py
+@Date: 2026-09-07
+@Description: 按文档层级和长度构建可检索内容块，并保留切片上下文元数据。
+"""
 import json
 import logging
 import re

@@ -1,4 +1,6 @@
-﻿export function set<T>(key: string, value: T): void {
+/** localStorage 安全读写工具，兼容不可用存储环境。 */
+
+export function set<T>(key: string, value: T): void {
   try {
     localStorage.setItem(key, JSON.stringify(value))
   } catch {

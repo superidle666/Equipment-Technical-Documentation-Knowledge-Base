@@ -1,4 +1,10 @@
-# processor/query_processor/nodes/node_rrf.py
+"""
+多路检索结果融合节点。
+
+@FilePath: processor/query_processor/nodes/node_rrf.py
+@Date: 2026-09-07
+@Description: 使用 Reciprocal Rank Fusion 合并普通向量检索和 HyDE 检索结果。
+"""
 from typing import List, Dict, Any, Tuple
 
 from processor.query_processor.base import NodeBase

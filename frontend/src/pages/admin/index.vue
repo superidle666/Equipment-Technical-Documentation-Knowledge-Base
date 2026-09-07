@@ -58,6 +58,8 @@ const uploadRequestId = ref(0)
 const collapsed = ref(false)
 const mobileOpen = ref(false)
 const userMenuExpanded = ref(true)
+const darkMode = ref(false)
+const ADMIN_DARK_MODE_KEY = 'kb-admin-dark-mode'
 const counts = ref<AdminCounts>({ documents: 0, users: 0, roles: 0, permissions: 0 })
 
 const allNavItems = [
@@ -152,8 +154,14 @@ function updateCounts(nextCounts: Partial<AdminCounts>) {
   counts.value = { ...counts.value, ...nextCounts }
 }
 
+function toggleAdminTheme() {
+  darkMode.value = !darkMode.value
+  window.localStorage.setItem(ADMIN_DARK_MODE_KEY, String(darkMode.value))
+}
+
 onMounted(() => {
   window.addEventListener('auth-expired', handleExpired)
+  darkMode.value = window.localStorage.getItem(ADMIN_DARK_MODE_KEY) === 'true'
   if (route.name === 'admin' && isAuthenticated.value) void loadCurrentUser()
 })
 
@@ -216,7 +224,7 @@ onBeforeUnmount(() => {
     <p class="login-footer">工智库 · 设备技术知识平台</p>
   </div>
 
-  <AdminLayout v-else>
+  <AdminLayout v-else :dark-mode="darkMode">
     <AdminSidebar
       :collapsed="collapsed"
       :mobile-open="mobileOpen"
@@ -239,8 +247,10 @@ onBeforeUnmount(() => {
         :title="pageTitle"
         :display-name="account?.display_name || account?.username || '已登录用户'"
         :role-label="roleLabel"
+        :dark-mode="darkMode"
         @open-menu="mobileOpen = true"
         @logout="logout"
+        @toggle-theme="toggleAdminTheme"
       />
       <div class="admin-content">
         <DashboardPage v-if="activeNav === 'dashboard'" @navigate="navigate" @update-counts="updateCounts" />

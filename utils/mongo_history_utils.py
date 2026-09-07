@@ -1,9 +1,17 @@
-# utils/mongo_history_utils.py
+"""
+MongoDB 会话历史工具。
+
+@FilePath: utils/mongo_history_utils.py
+@Date: 2026-09-07
+@Description: 管理用户会话、问答消息、来源和回答图片的持久化及历史查询。
+@BusinessRule: 会话和消息查询必须限制在当前用户范围内。
+"""
 
 # 导入系统模块：用于读取环境变量
 import os
 # 导入日志模块：用于记录程序运行日志（成功/失败/错误信息）
 import logging
+import uuid
 # 导入类型注解模块：用于函数参数/返回值的类型提示，提升代码可读性和规范性
 from typing import List, Dict, Any, Optional
 # 导入时间模块：用于生成时间戳，记录对话的创建时间
@@ -178,6 +186,36 @@ def ensure_user_session(session_id: str, user_id: int, library_id: int, title: s
     })
 
 
+def get_or_create_user_library_session(user_id: int, library_id: int, title: str = "新建技术咨询") -> Dict[str, Any]:
+    """获取用户在知识库下的唯一连续会话，并归并历史重复会话。"""
+    mongo_tool = get_history_mongo_tool()
+    sessions = list(
+        mongo_tool.chat_session.find({"user_id": user_id, "library_id": library_id})
+        .sort([("created_at", ASCENDING), ("_id", ASCENDING)])
+    )
+    if not sessions:
+        session = {
+            "_id": f"query-session-{uuid.uuid4().hex}",
+            "user_id": user_id,
+            "library_id": library_id,
+            "title": title.strip()[:64] or "新建技术咨询",
+            "created_at": datetime.now().timestamp(),
+            "updated_at": datetime.now().timestamp(),
+        }
+        mongo_tool.chat_session.insert_one(session)
+        return session
+
+    canonical = sessions[0]
+    duplicate_ids = [row["_id"] for row in sessions[1:]]
+    if duplicate_ids:
+        mongo_tool.chat_message.update_many(
+            {"session_id": {"$in": duplicate_ids}},
+            {"$set": {"session_id": canonical["_id"]}},
+        )
+        mongo_tool.chat_session.delete_many({"_id": {"$in": duplicate_ids}})
+    return canonical
+
+
 def touch_user_session(session_id: str) -> None:
     """更新会话最近活跃时间，使其在侧栏按最新对话排序。"""
     get_history_mongo_tool().chat_session.update_one(
@@ -202,6 +240,25 @@ def list_user_sessions(user_id: int, library_id: int | None = None, limit: int =
 def get_user_session(session_id: str, user_id: int) -> Optional[Dict[str, Any]]:
     """按用户范围读取单个会话，避免会话 ID 被跨用户访问。"""
     return get_history_mongo_tool().chat_session.find_one({"_id": session_id, "user_id": user_id})
+
+
+def rename_user_session(session_id: str, user_id: int, title: str) -> bool:
+    """更新当前用户会话标题。"""
+    result = get_history_mongo_tool().chat_session.update_one(
+        {"_id": session_id, "user_id": user_id},
+        {"$set": {"title": title.strip()[:64], "updated_at": datetime.now().timestamp()}},
+    )
+    return result.matched_count > 0
+
+
+def delete_user_session(session_id: str, user_id: int) -> bool:
+    """删除当前用户会话及其消息。"""
+    mongo_tool = get_history_mongo_tool()
+    session_result = mongo_tool.chat_session.delete_one({"_id": session_id, "user_id": user_id})
+    if session_result.deleted_count:
+        mongo_tool.chat_message.delete_many({"session_id": session_id})
+        return True
+    return False
 
 
 def get_session_messages(session_id: str, limit: int = 200) -> List[Dict[str, Any]]:

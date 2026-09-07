@@ -18,8 +18,10 @@ from backend.app.api.schemas import (
     QueryLibraryOut,
     QueryRequest,
     QueryResponse,
+    QuerySessionCreate,
     QuerySessionMessagesOut,
     QuerySessionOut,
+    QuerySessionUpdate,
     QuerySourceOut,
 )
 from backend.app.core.auth import AuthenticatedUser, get_current_user, get_optional_current_user
@@ -29,10 +31,13 @@ from processor.query_processor.main_graph import KBQueryWorkflow
 from utils.sse_utils import SSEEvent, create_sse_queue, get_sse_queue, push_to_session, remove_sse_queue
 from utils.mongo_history_utils import (
     ensure_user_session,
+    get_or_create_user_library_session,
     get_recent_messages,
     get_session_messages,
     get_user_session,
     list_user_sessions,
+    delete_user_session,
+    rename_user_session,
     save_chat_message,
     touch_user_session,
 )
@@ -131,10 +136,19 @@ async def _prepare_session_context(
     user: AuthenticatedUser | None,
 ) -> tuple[str, list[dict]]:
     """为登录用户创建会话、读取最近十条历史，并保存当前问题。"""
-    session_id = payload.session_id or f"query-session-{uuid.uuid4().hex}"
     if user is None:
-        return session_id, []
+        return payload.session_id or f"query-session-{uuid.uuid4().hex}", []
     try:
+        if payload.session_id and not payload.session_id.startswith("query-session-local-"):
+            session_id = payload.session_id
+        else:
+            session = await asyncio.to_thread(
+                get_or_create_user_library_session,
+                user.id,
+                payload.library_id,
+                payload.query,
+            )
+            session_id = str(session["_id"])
         await asyncio.to_thread(
             ensure_user_session,
             session_id,
@@ -157,6 +171,7 @@ async def _persist_assistant_message(
     session_id: str,
     answer: str,
     sources: list[QuerySourceOut],
+    image_urls: list[str],
 ) -> None:
     """登录用户查询完成后保存助手答复与可追溯来源。"""
     if user is None:
@@ -168,12 +183,35 @@ async def _persist_assistant_message(
             "assistant",
             answer,
             sources=[source.model_dump(mode="json") for source in sources],
+            image_urls=image_urls,
         )
         await asyncio.to_thread(touch_user_session, session_id)
     except Exception:
         # 历史写入失败不应覆盖已经生成的回答；下次请求仍会明确报出会话服务问题。
         return
 
+
+@router.post("/sessions", response_model=QuerySessionOut, response_class=UTF8JSONResponse)
+async def create_saved_session(
+    payload: QuerySessionCreate,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> QuerySessionOut:
+    """为当前用户在指定知识库下创建一个新的连续会话。"""
+    session_id = f"query-session-{uuid.uuid4().hex}"
+    try:
+        await asyncio.to_thread(ensure_user_session, session_id, user.id, payload.library_id, payload.title)
+        row = await asyncio.to_thread(get_user_session, session_id, user.id)
+    except Exception as error:
+        raise HTTPException(503, "会话历史服务暂时不可用，请稍后重试") from error
+    if row is None:
+        raise HTTPException(503, "新建会话失败，请稍后重试")
+    return QuerySessionOut(
+        id=session_id,
+        library_id=int(row["library_id"]),
+        title=str(row.get("title") or payload.title),
+        created_at=float(row.get("created_at") or 0),
+        updated_at=float(row.get("updated_at") or 0),
+    )
 
 @router.get("/sessions", response_model=list[QuerySessionOut], response_class=UTF8JSONResponse)
 async def list_saved_sessions(
@@ -183,6 +221,7 @@ async def list_saved_sessions(
     """读取当前登录用户的历史会话，可按知识库筛选。"""
     try:
         rows = await asyncio.to_thread(list_user_sessions, user.id, library_id)
+
     except Exception as error:
         raise HTTPException(503, "会话历史服务暂时不可用，请稍后重试") from error
     return [
@@ -222,10 +261,51 @@ async def get_saved_session_messages(
                 content=str(row.get("text") or ""),
                 created_at=float(row.get("ts") or 0),
                 sources=row.get("sources") or [],
+                image_urls=row.get("image_urls") or [],
             )
             for row in rows
         ],
     )
+
+
+@router.patch("/sessions/{session_id}", response_model=QuerySessionOut, response_class=UTF8JSONResponse)
+async def rename_saved_session(
+    session_id: str,
+    payload: QuerySessionUpdate,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> QuerySessionOut:
+    """重命名当前用户的历史会话。"""
+    try:
+        updated = await asyncio.to_thread(rename_user_session, session_id, user.id, payload.title)
+        if not updated:
+            raise HTTPException(404, "会话不存在或无权访问")
+        row = await asyncio.to_thread(get_user_session, session_id, user.id)
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(503, "会话历史服务暂时不可用，请稍后重试") from error
+    return QuerySessionOut(
+        id=session_id,
+        library_id=int(row["library_id"]),
+        title=str(row.get("title") or payload.title),
+        created_at=float(row.get("created_at") or 0),
+        updated_at=float(row.get("updated_at") or 0),
+    )
+
+
+@router.delete("/sessions/{session_id}", response_class=UTF8JSONResponse)
+async def delete_saved_session(
+    session_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, bool]:
+    """删除当前用户的历史会话及消息。"""
+    try:
+        deleted = await asyncio.to_thread(delete_user_session, session_id, user.id)
+    except Exception as error:
+        raise HTTPException(503, "会话历史服务暂时不可用，请稍后重试") from error
+    if not deleted:
+        raise HTTPException(404, "会话不存在或无权访问")
+    return {"deleted": True}
 
 
 @router.post("", response_model=QueryResponse, response_class=UTF8JSONResponse)
@@ -257,14 +337,17 @@ async def query_knowledge_base(
 
     sources = await _hydrate_sources(session, payload.library_id, result.get("sources") or [])
     answer = str(result.get("answer") or "").strip()
-    if not sources:
+    image_urls = [str(url) for url in result.get("image_urls") or [] if str(url).strip()]
+    if not sources and not answer:
         answer = "当前知识库中没有找到与该问题相关的内容。"
-    await _persist_assistant_message(user, session_id, answer, sources)
+    await _persist_assistant_message(user, session_id, answer, sources, image_urls)
     return QueryResponse(
         library_id=payload.library_id,
+        session_id=session_id,
         query=payload.query,
         answer=answer,
         sources=sources,
+        image_urls=image_urls,
     )
 
 
@@ -297,6 +380,7 @@ async def stream_query_knowledge_base(
             push_to_session(stream_id, "workflow_complete", {
                 "answer": str(result.get("answer") or "").strip(),
                 "sources": result.get("sources") or [],
+                "image_urls": result.get("image_urls") or [],
             })
         except Exception:
             push_to_session(stream_id, SSEEvent.ERROR, {
@@ -332,15 +416,18 @@ async def stream_query_knowledge_base(
 
                 sources = await _hydrate_sources(session, payload.library_id, data.get("sources") or [])
                 answer = str(data.get("answer") or "").strip()
-                if not sources:
+                image_urls = [str(url) for url in data.get("image_urls") or [] if str(url).strip()]
+                if not sources and not answer:
                     answer = "当前知识库中没有找到与该问题相关的内容。"
                 response = QueryResponse(
                     library_id=payload.library_id,
+                    session_id=session_id,
                     query=payload.query,
                     answer=answer,
                     sources=sources,
+                    image_urls=image_urls,
                 )
-                await _persist_assistant_message(user, session_id, answer, sources)
+                await _persist_assistant_message(user, session_id, answer, sources, image_urls)
                 yield _sse_event(SSEEvent.FINAL, response.model_dump(mode="json"))
                 return
         except asyncio.CancelledError:

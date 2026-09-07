@@ -1,3 +1,5 @@
+/** 分页状态、页码切换和分页数据加载逻辑。 */
+
 import { onMounted, ref, type Ref } from 'vue'
 import { PAGINATION } from '../constants'
 

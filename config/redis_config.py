@@ -13,7 +13,7 @@ load_dotenv()
 class RedisConfig:
     """Runtime settings for the import queue and worker."""
 
-    url: str = os.getenv("REDIS_URL", "redis://:123456@192.168.31.128:6379/0")
+    url: str = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
     queue_name: str = os.getenv("REDIS_QUEUE_NAME", "knowledge_base_import")
     max_retries: int = int(os.getenv("REDIS_MAX_RETRIES", "3"))
     job_timeout_seconds: int = int(os.getenv("REDIS_JOB_TIMEOUT", "3600"))

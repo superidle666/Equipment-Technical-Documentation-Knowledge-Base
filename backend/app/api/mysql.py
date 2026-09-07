@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import date, datetime, time, timedelta
@@ -39,11 +40,59 @@ from backend.app.db.session import get_db
 from config.milvus_config import milvus_config
 from utils.import_queue import enqueue_import_task, request_import_cancellation
 from utils.milvus_utils import get_milvus_client
+from utils.mongo_history_utils import get_history_mongo_tool
 
 router = APIRouter(prefix="/api/v1", tags=["mysql"], dependencies=[Depends(require_management_access)])
 
 
+@router.get("/dashboard/overview")
+async def dashboard_overview(session: AsyncSession = Depends(get_db)):
+    """返回管理端仪表盘实时汇总数据。
+
+    Note:
+        问答会话统计来自 MongoDB，操作活动来自 MySQL；没有助手回答时命中率固定为 0。
+    """
+    now = datetime.now()
+    month_start = datetime(now.year, now.month, 1).timestamp()
+    mongo = get_history_mongo_tool()
+
+    session_count = await asyncio.to_thread(
+        mongo.chat_session.count_documents,
+        {"updated_at": {"$gte": month_start}},
+    )
+    assistant_count = await asyncio.to_thread(
+        mongo.chat_message.count_documents,
+        {"role": "assistant", "ts": {"$gte": month_start}},
+    )
+    answered_count = await asyncio.to_thread(
+        mongo.chat_message.count_documents,
+        {"role": "assistant", "ts": {"$gte": month_start}, "sources.0": {"$exists": True}},
+    )
+    hit_rate = round(answered_count / assistant_count * 100, 1) if assistant_count else 0
+
+    logs = await session.execute(
+        select(OperationLog, User.display_name)
+        .outerjoin(User, User.id == OperationLog.user_id)
+        .order_by(OperationLog.id.desc())
+        .limit(3)
+    )
+    log_rows = logs.all()
+    resource_names = await operation_log_resource_names(session, [item for item, _ in log_rows])
+    activities = [
+        {
+            "operation": item.operation,
+            "resource_type": item.resource_type,
+            "resource_display_name": resource_names.get(item.id),
+            "user_display_name": display_name,
+            "created_at": item.created_at,
+        }
+        for item, display_name in log_rows
+    ]
+    return {"session_count": session_count, "hit_rate": hit_rate, "activities": activities}
+
 async def get_or_404(session: AsyncSession, model: type, item_id: int, label: str):
+    """按主键读取管理对象。资源不存在时统一转换为业务 404，避免接口重复处理空值。
+    """
     item = await session.get(model, item_id)
     if item is None:
         raise HTTPException(404, f"{label}不存在")
@@ -51,6 +100,8 @@ async def get_or_404(session: AsyncSession, model: type, item_id: int, label: st
 
 
 async def commit(session: AsyncSession, duplicate_message: str) -> None:
+    """提交管理操作事务。唯一约束冲突会先回滚事务，再转换为指定的 400 业务提示。
+    """
     try:
         await session.commit()
     except IntegrityError as exc:
@@ -64,7 +115,8 @@ ALLOWED_DOCUMENT_EXTENSIONS = frozenset({".pdf", ".md"})
 IMPORT_TASK_STATUSES = frozenset({"queued", "processing", "completed", "failed", "cancelled"})
 
 def validate_library_rules(payload: dict) -> None:
-    """Validate rule values stored on a knowledge base."""
+    """校验知识库导入与切分规则，确保保存的配置不超出当前处理器支持范围。
+    """
     allowed = payload.get("allowed_file_types")
     if allowed is not None:
         normalized = {str(item).strip().lower().lstrip(".") for item in allowed if str(item).strip()}
@@ -92,7 +144,11 @@ def validate_library_rules(payload: dict) -> None:
 async def operation_log_resource_names(
     session: AsyncSession, logs: list[OperationLog]
 ) -> dict[int, str]:
-    """Resolve audit-log resource names in batches, including soft-deleted rows."""
+    """批量解析操作日志关联资源的展示名称。
+
+    Note:
+        资源已删除或历史缺失时保留空名称，由调用方回退展示资源类型。
+    """
     names: dict[int, str] = {}
     model_specs = {
         "user": (User, User.display_name),
@@ -156,6 +212,8 @@ async def operation_log_resource_names(
 
 
 def user_out(user: User) -> dict:
+    """将用户实体转换为管理端安全响应，不返回密码摘要等认证内部字段。
+    """
     return {
         "id": user.id, "username": user.username, "email": user.email, "phone": user.phone,
         "display_name": user.display_name, "avatar_url": user.avatar_url, "status": user.status,
@@ -165,6 +223,8 @@ def user_out(user: User) -> dict:
 
 
 def role_out(role: Role) -> dict:
+    """将角色实体转换为管理端响应，包含角色基础信息和已分配权限编码。
+    """
     return {
         "id": role.id, "code": role.code, "name": role.name, "description": role.description,
         "status": role.status, "deleted_at": role.deleted_at, "deleted_by": role.deleted_by,
@@ -176,6 +236,8 @@ def role_out(role: Role) -> dict:
 
 
 def permission_out(permission: Permission) -> dict:
+    """将权限实体转换为管理端响应，包含代码注册的权限编码、名称和说明。
+    """
     return {
         "id": permission.id, "code": permission.code, "name": permission.name,
         "description": permission.description, "status": permission.status,
@@ -185,6 +247,8 @@ def permission_out(permission: Permission) -> dict:
 
 
 def document_out(document: Document, *, chunk_count: int = 0, tags: list[str] | None = None, library_name: str | None = None) -> dict:
+    """组装文档管理响应，补充标签和切片数量等列表、详情展示字段。
+    """
     return {
         "id": document.id, "library_id": document.library_id, "title": document.title,
         "original_filename": document.original_filename, "storage_key": document.storage_key,
@@ -200,6 +264,8 @@ def document_out(document: Document, *, chunk_count: int = 0, tags: list[str] | 
 
 # NOTE: 角色只能引用代码注册表中的有效权限，防止后台写入没有对应接口授权规则的权限编码。
 async def resolve_registered_permissions(session: AsyncSession, codes: list[str]) -> list[Permission]:
+    """加载角色可分配的系统权限。权限必须来自代码注册表，未注册或不可用编码返回 400。
+    """
     requested = list(dict.fromkeys(codes))
     if set(requested) - REGISTERED_PERMISSION_CODES:
         raise HTTPException(400, "只能分配权限注册表中的权限")
@@ -215,6 +281,8 @@ async def resolve_registered_permissions(session: AsyncSession, codes: list[str]
 
 
 async def registered_permission_or_404(session: AsyncSession, permission_id: int) -> Permission:
+    """读取代码注册表中的权限。权限不存在或未注册时返回 404。
+    """
     permission = await get_or_404(session, Permission, permission_id, "权限")
     if not is_registered_permission(permission.code):
         raise HTTPException(404, "权限不存在")
@@ -223,6 +291,8 @@ async def registered_permission_or_404(session: AsyncSession, permission_id: int
 
 @router.get("/users", response_model=list[UserOut])
 async def list_users(include_deleted: bool = Query(False), session: AsyncSession = Depends(get_db)):
+    """查询管理端用户列表。默认隐藏软删除账号，保留其历史记录用于审计与恢复。
+    """
     statement = select(User).options(selectinload(User.roles)).order_by(User.id.desc())
     if not include_deleted:
         statement = statement.where(User.deleted_at.is_(None))
@@ -231,6 +301,8 @@ async def list_users(include_deleted: bool = Query(False), session: AsyncSession
 
 @router.post("/users", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def create_user(payload: UserCreate, session: AsyncSession = Depends(get_db)):
+    """创建管理端用户、保存密码哈希并分配初始角色，同时写入操作审计日志。
+    """
     result = await session.execute(
         select(Role).where(Role.code.in_(list(dict.fromkeys(payload.role_codes))), Role.deleted_at.is_(None))
     )
@@ -253,6 +325,8 @@ async def create_user(payload: UserCreate, session: AsyncSession = Depends(get_d
 @router.patch("/users/{user_id}", response_model=UserOut)
 async def update_user(user_id: int, payload: UserUpdate, session: AsyncSession = Depends(get_db)):
     # Preload the collection before replacing this async many-to-many relationship.
+    """更新用户资料、状态和角色分配。角色必须有效，普通更新不会恢复软删除账号。
+    """
     result = await session.execute(
         select(User).options(selectinload(User.roles)).where(User.id == user_id)
     )
@@ -279,6 +353,8 @@ async def update_user(user_id: int, payload: UserUpdate, session: AsyncSession =
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(user_id: int, session: AsyncSession = Depends(get_db)):
+    """软删除管理端用户。禁止删除当前操作者或受保护系统管理员，删除后保留历史关联与审计记录。
+    """
     user = await get_or_404(session, User, user_id, "用户")
     user.deleted_at = datetime.now()
     await log(session, "delete", "user", user.id)
@@ -287,6 +363,8 @@ async def delete_user(user_id: int, session: AsyncSession = Depends(get_db)):
 
 @router.get("/roles", response_model=list[RoleOut])
 async def list_roles(include_deleted: bool = Query(False), session: AsyncSession = Depends(get_db)):
+    """查询角色及其权限分配。默认隐藏软删除角色。
+    """
     statement = select(Role).options(selectinload(Role.permissions)).order_by(Role.id.desc())
     if not include_deleted:
         statement = statement.where(Role.deleted_at.is_(None))
@@ -295,6 +373,8 @@ async def list_roles(include_deleted: bool = Query(False), session: AsyncSession
 
 @router.post("/roles", response_model=RoleOut, status_code=status.HTTP_201_CREATED)
 async def create_role(payload: RoleCreate, session: AsyncSession = Depends(get_db)):
+    """创建角色并绑定代码注册权限。角色编码重复或权限编码无效时返回 400。
+    """
     role = Role(
         code=payload.code, name=payload.name, description=payload.description,
         permissions=await resolve_registered_permissions(session, payload.permission_codes),
@@ -309,6 +389,8 @@ async def create_role(payload: RoleCreate, session: AsyncSession = Depends(get_d
 @router.patch("/roles/{role_id}", response_model=RoleOut)
 async def update_role(role_id: int, payload: RoleUpdate, session: AsyncSession = Depends(get_db)):
     # Preload the collection before replacing this async many-to-many relationship.
+    """更新角色基础信息和权限分配。内置管理员角色不能通过普通接口修改。
+    """
     result = await session.execute(
         select(Role).options(selectinload(Role.permissions)).where(Role.id == role_id)
     )
@@ -329,6 +411,8 @@ async def update_role(role_id: int, payload: RoleUpdate, session: AsyncSession =
 
 @router.delete("/roles/{role_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_role(role_id: int, session: AsyncSession = Depends(get_db)):
+    """软删除非内置角色。仍被用户使用或属于系统内置角色时不允许删除。
+    """
     role = await get_or_404(session, Role, role_id, "角色")
     role.deleted_at = datetime.now()
     await log(session, "delete", "role", role.id)
@@ -338,6 +422,8 @@ async def delete_role(role_id: int, session: AsyncSession = Depends(get_db)):
 @router.post("/roles/{role_id}/restore", response_model=RoleOut)
 async def restore_role(role_id: int, session: AsyncSession = Depends(get_db)):
     # Preload the collection before replacing this async many-to-many relationship.
+    """恢复已软删除的非内置角色。目标必须已删除，且恢复后不能造成名称冲突。
+    """
     result = await session.execute(
         select(Role).options(selectinload(Role.permissions)).where(Role.id == role_id)
     )
@@ -354,6 +440,8 @@ async def restore_role(role_id: int, session: AsyncSession = Depends(get_db)):
 
 @router.get("/permissions", response_model=list[PermissionOut])
 async def list_permissions(session: AsyncSession = Depends(get_db)):
+    """查询代码注册表支持的权限列表，供角色配置和管理端展示使用。
+    """
     result = await session.execute(
         select(Permission)
         .where(Permission.code.in_(REGISTERED_PERMISSION_CODES))
@@ -364,11 +452,15 @@ async def list_permissions(session: AsyncSession = Depends(get_db)):
 
 @router.post("/permissions", status_code=status.HTTP_405_METHOD_NOT_ALLOWED)
 async def create_permission():
+    """拒绝动态创建权限。新权限必须先在代码注册表中声明，保证鉴权规则可追踪。
+    """
     raise HTTPException(405, "权限由系统注册表维护，不能手动新增")
 
 
 @router.patch("/permissions/{permission_id}", response_model=PermissionOut)
 async def update_permission(permission_id: int, payload: PermissionUpdate, session: AsyncSession = Depends(get_db)):
+    """拒绝直接修改系统权限定义。权限语义和资源映射由代码维护。
+    """
     permission = await registered_permission_or_404(session, permission_id)
     status_changed_to = payload.status if payload.status is not None and payload.status != permission.status else None
     if payload.status is not None:
@@ -381,18 +473,24 @@ async def update_permission(permission_id: int, payload: PermissionUpdate, sessi
 
 @router.delete("/permissions/{permission_id}", status_code=status.HTTP_405_METHOD_NOT_ALLOWED)
 async def delete_permission(permission_id: int, session: AsyncSession = Depends(get_db)):
+    """拒绝删除系统注册权限，避免已有角色引用失效。
+    """
     await registered_permission_or_404(session, permission_id)
     raise HTTPException(405, "注册权限不能删除，可通过启用或停用控制状态")
 
 
 @router.post("/permissions/{permission_id}/restore", status_code=status.HTTP_405_METHOD_NOT_ALLOWED)
 async def restore_permission(permission_id: int, session: AsyncSession = Depends(get_db)):
+    """拒绝恢复或变更系统权限生命周期，权限变更必须通过代码注册表完成。
+    """
     await registered_permission_or_404(session, permission_id)
     raise HTTPException(405, "注册权限由系统自动同步，无需手动恢复")
 
 
 @router.get("/libraries", response_model=list[LibraryOut])
 async def list_libraries(include_deleted: bool = Query(False), session: AsyncSession = Depends(get_db)):
+    """查询知识库列表。默认隐藏软删除知识库，并返回导入规则和基础展示信息。
+    """
     statement = select(Library).order_by(Library.id.desc())
     if not include_deleted:
         statement = statement.where(Library.deleted_at.is_(None))
@@ -405,6 +503,8 @@ async def create_library(
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
+    """创建知识库并保存导入规则。规则会影响后续文档处理，名称重复或规则无效时返回 400。
+    """
     if payload.entity_recognition_mode != "disabled" and not current_user.is_system_admin:
         raise HTTPException(403, "实体识别模式仅管理员可设置")
     validate_library_rules(payload.model_dump())
@@ -424,6 +524,8 @@ async def update_library(
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
+    """更新知识库资料和导入规则。修改配置不会自动重新处理已经导入的文档。
+    """
     if payload.entity_recognition_mode is not None and payload.entity_recognition_mode != "disabled" and not current_user.is_system_admin:
         raise HTTPException(403, "实体识别模式仅管理员可设置")
     library = await get_or_404(session, Library, library_id, "知识库")
@@ -439,6 +541,8 @@ async def update_library(
 
 @router.delete("/libraries/{library_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_library(library_id: int, session: AsyncSession = Depends(get_db), current_user: AuthenticatedUser = Depends(get_current_user)):
+    """软删除知识库并保留关联数据和审计记录，为后续恢复及历史追溯保留基础。
+    """
     library = await get_or_404(session, Library, library_id, "知识库")
     if library.document_count > 0:
         raise HTTPException(400, "知识库仍包含文档，不能删除")
@@ -450,6 +554,8 @@ async def delete_library(library_id: int, session: AsyncSession = Depends(get_db
 
 @router.post("/libraries/{library_id}/restore", response_model=LibraryOut)
 async def restore_library(library_id: int, session: AsyncSession = Depends(get_db)):
+    """恢复已软删除的知识库，使其重新出现在默认管理列表中。
+    """
     library = await get_or_404(session, Library, library_id, "知识库")
     library.deleted_at = None
     library.deleted_by = None
@@ -461,12 +567,16 @@ async def restore_library(library_id: int, session: AsyncSession = Depends(get_d
 
 @router.get("/libraries/{library_id}/members", response_model=list[MemberOut])
 async def list_members(library_id: int, session: AsyncSession = Depends(get_db)):
+    """查询知识库成员和访问级别。成员关系是后续按指定用户执行知识库权限校验的基础。
+    """
     await get_or_404(session, Library, library_id, "知识库")
     return list((await session.execute(select(LibraryMember).where(LibraryMember.library_id == library_id))).scalars())
 
 
 @router.post("/libraries/{library_id}/members", response_model=MemberOut, status_code=status.HTTP_201_CREATED)
 async def add_member(library_id: int, payload: MemberCreate, session: AsyncSession = Depends(get_db)):
+    """为指定用户授予知识库成员资格。知识库、用户或成员关系异常时返回对应业务错误。
+    """
     await get_or_404(session, Library, library_id, "知识库")
     await get_or_404(session, User, payload.user_id, "用户")
     member = LibraryMember(library_id=library_id, **payload.model_dump())
@@ -480,6 +590,8 @@ async def add_member(library_id: int, payload: MemberCreate, session: AsyncSessi
 
 @router.delete("/libraries/{library_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_member(library_id: int, user_id: int, session: AsyncSession = Depends(get_db)):
+    """撤销用户的知识库成员资格，仅影响后续权限校验，不删除历史审计数据。
+    """
     member = await session.get(LibraryMember, {"library_id": library_id, "user_id": user_id})
     if member is None:
         raise HTTPException(404, "成员不存在")
@@ -488,6 +600,8 @@ async def remove_member(library_id: int, user_id: int, session: AsyncSession = D
 
 
 async def document_tags(session: AsyncSession, document_id: int) -> list[str]:
+    """读取文档绑定的标签名称，并按名称排序返回。
+    """
     result = await session.execute(
         select(Tag.name).join(DocumentTag, DocumentTag.tag_id == Tag.id)
         .where(DocumentTag.document_id == document_id).order_by(Tag.name)
@@ -496,6 +610,8 @@ async def document_tags(session: AsyncSession, document_id: int) -> list[str]:
 
 
 async def document_chunk_count(session: AsyncSession, document_id: int) -> int:
+    """统计文档已持久化的切片数量，用于管理端展示处理结果。
+    """
     return (await session.execute(select(func.count(DocumentChunk.id)).where(DocumentChunk.document_id == document_id))).scalar_one()
 
 
@@ -504,6 +620,8 @@ async def list_documents(
     library_id: int | None = Query(None), include_deleted: bool = Query(False),
     session: AsyncSession = Depends(get_db),
 ):
+    """按知识库查询文档列表，返回文档状态、标签和切片摘要。默认隐藏软删除文档。
+    """
     statement = select(Document, Library.name).join(Library).order_by(Document.id.desc())
     if library_id is not None:
         statement = statement.where(Document.library_id == library_id)
@@ -519,6 +637,8 @@ async def list_documents(
 
 @router.post("/documents", response_model=DocumentListOut, status_code=status.HTTP_201_CREATED)
 async def create_document(payload: DocumentCreate, session: AsyncSession = Depends(get_db)):
+    """创建待导入的文档元数据。该接口不执行文件解析，实际处理由上传接口和导入任务完成。
+    """
     library = await get_or_404(session, Library, payload.library_id, "知识库")
     if library.deleted_at is not None or library.status != "active":
         raise HTTPException(400, "知识库已删除或停用")
@@ -539,7 +659,11 @@ async def upload_document(
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Validate a batch of documents, then create durable import tasks in one transaction."""
+    """上传 PDF 或 Markdown 文件，创建文档记录并提交导入任务。
+
+    Note:
+        失败时不得留下孤立文件、文档或任务。
+    """
     library = await get_or_404(session, Library, library_id, "知识库")
     if library.deleted_at is not None or library.status != "active":
         raise HTTPException(400, "知识库已删除或停用")
@@ -626,6 +750,8 @@ async def upload_document(
 
 @router.get("/documents/{document_id}", response_model=DocumentDetailOut)
 async def get_document(document_id: int, session: AsyncSession = Depends(get_db)):
+    """查询单个文档的管理详情，包含标签、处理状态和切片数量。
+    """
     document = await get_or_404(session, Document, document_id, "文档")
     library = await get_or_404(session, Library, document.library_id, "知识库")
     return document_out(document, chunk_count=await document_chunk_count(session, document.id),
@@ -634,6 +760,8 @@ async def get_document(document_id: int, session: AsyncSession = Depends(get_db)
 
 @router.patch("/documents/{document_id}", response_model=DocumentDetailOut)
 async def update_document(document_id: int, payload: DocumentUpdate, session: AsyncSession = Depends(get_db)):
+    """更新文档展示信息和业务元数据。修改元数据不会自动触发重新切分或向量化。
+    """
     document = await get_or_404(session, Document, document_id, "文档")
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(document, field, value)
@@ -645,7 +773,8 @@ async def update_document(document_id: int, payload: DocumentUpdate, session: As
 
 
 def delete_document_vectors(knowledge_base_id: int, document_id: int, *, milvus_client=None) -> None:
-    """Delete all v2 vectors belonging to one document without touching other knowledge bases."""
+    """删除向量库中指定文档的全部切片，避免文档删除后仍被问答检索到。
+    """
     client = milvus_client or get_milvus_client()
     collection_name = milvus_config.document_chunks_v2_collection
     if not client.has_collection(collection_name=collection_name):
@@ -667,7 +796,11 @@ def delete_document_vectors(knowledge_base_id: int, document_id: int, *, milvus_
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(document_id: int, session: AsyncSession = Depends(get_db), current_user: AuthenticatedUser = Depends(get_current_user)):
-    """Remove document vectors and dependent records before soft-deleting the document itself."""
+    """删除文档及其检索数据。
+
+    Note:
+        删除前应处理未结束导入任务，并同步清理数据库、向量库和处理文件。
+    """
     document = await get_or_404(session, Document, document_id, "文档")
     active_task_id = await session.scalar(
         select(ImportTask.id).where(
@@ -704,6 +837,8 @@ async def delete_document(document_id: int, session: AsyncSession = Depends(get_
 
 @router.get("/documents/{document_id}/chunks", response_model=list[ChunkOut])
 async def list_document_chunks(document_id: int, session: AsyncSession = Depends(get_db)):
+    """按切片顺序查询文档内容及来源位置，用于管理端查看解析结果。
+    """
     await get_or_404(session, Document, document_id, "文档")
     result = await session.execute(
         select(DocumentChunk).where(DocumentChunk.document_id == document_id).order_by(DocumentChunk.chunk_index)
@@ -713,6 +848,8 @@ async def list_document_chunks(document_id: int, session: AsyncSession = Depends
 
 @router.put("/documents/{document_id}/tags", response_model=DocumentDetailOut)
 async def replace_document_tags(document_id: int, payload: DocumentTagsUpdate, session: AsyncSession = Depends(get_db)):
+    """整体替换文档标签关联，确保前端提交集合与数据库最终状态一致。
+    """
     document = await get_or_404(session, Document, document_id, "文档")
     names = list(dict.fromkeys(name.strip() for name in payload.tag_names if name.strip()))
     result = await session.execute(select(Tag).where(Tag.name.in_(names))) if names else None
@@ -734,7 +871,8 @@ async def replace_document_tags(document_id: int, payload: DocumentTagsUpdate, s
 
 
 def import_task_out(task: ImportTask) -> dict:
-    """Serialize an import task with its related document and library labels."""
+    """将导入任务转换为管理端响应，包含任务状态、进度、错误信息和关联文档摘要。
+    """
     return {
         "id": task.id, "library_id": task.library_id, "document_id": task.document_id,
         "status": task.status, "current_step": task.current_step, "progress": task.progress,
@@ -753,7 +891,8 @@ async def list_import_tasks(
     import_date: date | None = Query(None),
     session: AsyncSession = Depends(get_db),
 ):
-    """List durable import tasks, optionally scoped to a library, status, and creation date."""
+    """按知识库或任务状态查询导入任务，返回任务进度和关联文档信息。
+    """
     statement = select(ImportTask).options(selectinload(ImportTask.document), selectinload(ImportTask.library)).order_by(ImportTask.id.desc())
     if library_id is not None: statement = statement.where(ImportTask.library_id == library_id)
     if task_status is not None:
@@ -768,12 +907,16 @@ async def list_import_tasks(
 
 @router.get("/import-tasks/{task_id}", response_model=ImportTaskOut)
 async def get_import_task(task_id: int, session: AsyncSession = Depends(get_db)):
+    """查询单个导入任务的当前步骤、进度和错误信息。
+    """
     task = await session.scalar(select(ImportTask).options(selectinload(ImportTask.document), selectinload(ImportTask.library)).where(ImportTask.id == task_id))
     if task is None: raise HTTPException(404, "导入任务不存在")
     return import_task_out(task)
 
 @router.post("/import-tasks/{task_id}/retry", response_model=ImportTaskOut)
 async def retry_import_task(task_id: int, session: AsyncSession = Depends(get_db)):
+    """重新排队失败或取消的导入任务。运行中的任务禁止重复入队，避免同一文档并发处理。
+    """
     task = await session.scalar(select(ImportTask).options(selectinload(ImportTask.document), selectinload(ImportTask.library)).where(ImportTask.id == task_id))
     if task is None: raise HTTPException(404, "导入任务不存在")
     if task.status != "failed": raise HTTPException(400, "只有失败任务可以重试")
@@ -786,6 +929,8 @@ async def retry_import_task(task_id: int, session: AsyncSession = Depends(get_db
 
 @router.post("/import-tasks/{task_id}/cancel", response_model=ImportTaskOut)
 async def cancel_import_task(task_id: int, session: AsyncSession = Depends(get_db)):
+    """取消排队或处理中的导入任务，并使关联文档恢复为可重新导入状态。终态任务不能取消。
+    """
     task = await session.scalar(select(ImportTask).options(selectinload(ImportTask.document), selectinload(ImportTask.library)).where(ImportTask.id == task_id))
     if task is None: raise HTTPException(404, "导入任务不存在")
     if task.status not in {"queued", "processing"}: raise HTTPException(400, "当前任务不能取消")
@@ -799,7 +944,8 @@ async def cancel_import_task(task_id: int, session: AsyncSession = Depends(get_d
 
 @router.delete("/import-tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_import_task(task_id: int, session: AsyncSession = Depends(get_db)):
-    """Delete a terminal task record without deleting its document or imported chunks."""
+    """删除已完成、失败或取消的导入任务记录。删除任务不会删除文档或已生成的知识切片。
+    """
     task = await session.get(ImportTask, task_id)
     if task is None:
         raise HTTPException(404, "导入任务不存在")
@@ -811,11 +957,15 @@ async def delete_import_task(task_id: int, session: AsyncSession = Depends(get_d
 
 @router.get("/tags", response_model=list[TagOut])
 async def list_tags(session: AsyncSession = Depends(get_db)):
+    """查询按名称排序的文档标签列表。
+    """
     return list((await session.execute(select(Tag).order_by(Tag.name))).scalars())
 
 
 @router.post("/tags", response_model=TagOut, status_code=status.HTTP_201_CREATED)
 async def create_tag(payload: TagCreate, session: AsyncSession = Depends(get_db)):
+    """创建文档分类标签。标签名称必须唯一，重复名称返回 400。
+    """
     tag = Tag(name=payload.name.strip())
     session.add(tag)
     await session.flush()
@@ -827,6 +977,8 @@ async def create_tag(payload: TagCreate, session: AsyncSession = Depends(get_db)
 
 @router.patch("/tags/{tag_id}", response_model=TagOut)
 async def update_tag(tag_id: int, payload: TagUpdate, session: AsyncSession = Depends(get_db)):
+    """修改标签名称。标签不存在或新名称冲突时返回对应业务错误。
+    """
     tag = await get_or_404(session, Tag, tag_id, "标签")
     tag.name = payload.name.strip()
     await log(session, "update", "tag", tag.id, {"name": tag.name})
@@ -837,6 +989,8 @@ async def update_tag(tag_id: int, payload: TagUpdate, session: AsyncSession = De
 
 @router.delete("/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_tag(tag_id: int, session: AsyncSession = Depends(get_db)):
+    """删除文档标签。数据库关联约束负责防止留下无效文档标签关系。
+    """
     tag = await get_or_404(session, Tag, tag_id, "标签")
     await log(session, "delete", "tag", tag.id, {"name": tag.name})
     await session.delete(tag)
@@ -852,6 +1006,11 @@ async def list_operation_logs(
     operation: str | None = Query(None), started_at: datetime | None = Query(None),
     ended_at: datetime | None = Query(None), session: AsyncSession = Depends(get_db),
 ):
+    """分页查询管理操作日志。
+
+    Note:
+        支持按操作人、资源类型、操作类型和时间范围筛选；资源删除后仍保留类型和编号满足审计追溯。
+    """
     filters = []
     if user_id is not None: filters.append(OperationLog.user_id == user_id)
     if resource_type: filters.append(OperationLog.resource_type == resource_type)

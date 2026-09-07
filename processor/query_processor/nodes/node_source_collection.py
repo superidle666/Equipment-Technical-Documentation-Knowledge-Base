@@ -30,8 +30,6 @@ class NodeSourceCollection(NodeBase):
             if len(sources) >= limit:
                 break
         state["sources"] = sources
-        if not sources:
-            state["answer"] = "当前知识库中没有找到与该问题相关的内容。"
         return state
 
     @staticmethod

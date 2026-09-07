@@ -5,6 +5,24 @@
 .avatar.tiny { width: 25px; height: 25px; font-size: 10px; }
 .admin-mark { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 9px; color: #fff; background: #2563eb; font-weight: 700; font-size: 18px; }
 .admin-shell { min-height: 100vh; display: flex; background: #f7f8fa; color: #1f2937; --admin-primary: #2563eb; }
+.admin-shell.is-dark { background: #111827; color: #f3f4f6; --admin-primary: #60a5fa; color-scheme: dark; }
+.admin-shell.is-dark .admin-content,
+.admin-shell.is-dark .panel,
+.admin-shell.is-dark .card,
+.admin-shell.is-dark .table-panel,
+.admin-shell.is-dark .admin-sidebar { background: #1f2937; border-color: #374151; color: #f3f4f6; }
+.admin-shell.is-dark .admin-content { background: #111827; }
+.admin-shell.is-dark .admin-page-head p,
+.admin-shell.is-dark .panel-head p,
+.admin-shell.is-dark .admin-breadcrumb,
+.admin-shell.is-dark .admin-top-account span { color: #9ca3af; }
+.admin-shell.is-dark input,
+.admin-shell.is-dark textarea,
+.admin-shell.is-dark .t-input,
+.admin-shell.is-dark .t-select,
+.admin-shell.is-dark .t-textarea { background: #273449; color: #f3f4f6; border-color: #4b5563; }
+.admin-shell.is-dark .t-table { background: #1f2937; color: #f3f4f6; }
+.admin-shell.is-dark .t-table th { background: #273449; color: #d1d5db; }
 .admin-page-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 28px; }
 .admin-page-head.compact { margin-bottom: 24px; }
 .admin-page-head h1 { margin: 7px 0 5px; font-size: 25px; letter-spacing: 0; }

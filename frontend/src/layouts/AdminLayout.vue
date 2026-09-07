@@ -5,10 +5,10 @@
  * @Description: 管理端主布局容器，提供响应式内容区域
  -->
 <script setup lang="ts">
-defineProps<{ authenticated?: boolean }>()
+defineProps<{ authenticated?: boolean; darkMode?: boolean }>()
 </script>
 <template>
-  <div class="admin-shell">
+  <div class="admin-shell" :class="{ 'is-dark': darkMode }">
     <slot />
   </div>
 </template>

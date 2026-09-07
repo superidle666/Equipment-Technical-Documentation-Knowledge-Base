@@ -1,4 +1,12 @@
 
+"""
+问答工作流状态定义。
+
+@FilePath: processor/query_processor/state.py
+@Date: 2026-09-07
+@Description: 统一声明导入问答节点之间传递的查询、检索、答案和图片字段。
+"""
+
 from typing import TypedDict, List
 
 class QueryGraphState(TypedDict, total=False):
@@ -31,6 +39,7 @@ class QueryGraphState(TypedDict, total=False):
     # 生成过程中的数据
     prompt: str  # 组装好的 Prompt
     answer: str  # 最终生成的答案
+    image_urls: list  # 答案关联的图片 URL 列表
 
     # 辅助信息
     item_names: List[str]  # 提取出的商品名称

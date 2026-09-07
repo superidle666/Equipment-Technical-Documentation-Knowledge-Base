@@ -1,4 +1,10 @@
-# processor/query_processor/nodes/node_rerank.py
+"""
+检索结果重排序节点。
+
+@FilePath: processor/query_processor/nodes/node_rerank.py
+@Date: 2026-09-07
+@Description: 对多路召回结果进行精排和断崖截断，输出最终知识片段集合。
+"""
 from typing import Dict, Any, List
 
 from processor.query_processor.base import NodeBase

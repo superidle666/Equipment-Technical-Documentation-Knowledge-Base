@@ -1,3 +1,5 @@
+/** 应用级状态：主题和管理端侧栏状态。 */
+
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 

@@ -1,4 +1,6 @@
-﻿import { ref } from 'vue'
+/** 通用弹窗状态与打开、关闭、确认回调管理。 */
+
+import { ref } from 'vue'
 
 export type UseModalOptions = {
   onOpen?: () => void | Promise<void>

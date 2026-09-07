@@ -1,3 +1,8 @@
+<!--
+ * @FilePath: frontend/src/pages/user/login.vue
+ * @Date: 2026-09-07
+ * @Description: 用户端登录页面，负责账号认证和登录后跳转。
+ -->
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'

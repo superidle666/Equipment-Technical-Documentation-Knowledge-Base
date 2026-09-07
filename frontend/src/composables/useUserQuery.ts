@@ -1,3 +1,5 @@
+/** 用户端知识库问答请求状态和流式响应管理。 */
+
 import { ref } from 'vue'
 import { queryKnowledgeBaseStream, type QueryRequest, type QueryResponse } from '../api/query'
 

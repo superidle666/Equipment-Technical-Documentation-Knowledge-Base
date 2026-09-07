@@ -1,4 +1,6 @@
-﻿type DateInput = Date | string | number
+/** 日期解析和格式化工具，兼容 Date、时间戳和日期字符串输入。 */
+
+type DateInput = Date | string | number
 
 function toDate(value: DateInput): Date | null {
   const date = value instanceof Date ? new Date(value.getTime()) : new Date(value)

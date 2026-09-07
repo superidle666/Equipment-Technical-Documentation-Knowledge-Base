@@ -1,3 +1,11 @@
+"""
+全局日志配置。
+
+@FilePath: tool/logger.py
+@Date: 2026-09-07
+@Description: 创建带颜色格式的根日志记录器，统一输出处理流程运行信息。
+"""
+
 import logging
 
 import colorlog

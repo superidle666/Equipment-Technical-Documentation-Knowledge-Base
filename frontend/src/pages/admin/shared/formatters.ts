@@ -1,3 +1,5 @@
+/** 管理端共享格式化函数，统一展示日期、状态和资源名称。 */
+
 import type { Document, Library, User } from '../../../api/mysql'
 import { formatDate } from '../../../utils/date'
 import { formatFileSize } from '../../../utils/format'

@@ -1,3 +1,11 @@
+"""
+SSE 流式通信工具。
+
+@FilePath: utils/sse_utils.py
+@Date: 2026-09-07
+@Description: 管理问答流式会话队列、事件类型和异步响应数据传递。
+"""
+
 import json
 import queue
 import asyncio

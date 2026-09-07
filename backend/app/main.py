@@ -1,12 +1,10 @@
 """统一 FastAPI 应用入口。
 
-负责注册健康检查、MySQL 管理接口，并以懒加载方式挂载旧版导入和问答服务。
+负责注册健康检查、认证、管理端、用户问答和系统设置接口。
 """
 
 import os
 from contextlib import asynccontextmanager
-from threading import Lock
-from typing import Callable
 
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
@@ -20,40 +18,6 @@ from backend.app.core.config import settings
 from backend.app.core.permissions import sync_permission_registry
 from backend.app.core.system_settings import sync_system_settings
 from backend.app.db.session import SessionLocal
-
-
-class LazyASGIApp:
-    """在首次访问挂载路由时加载旧服务，兼容迁移期间的可选依赖。"""
-
-    def __init__(self, loader: Callable[[], object]):
-        self._loader = loader
-        self._app = None
-        self._lock = Lock()
-
-    def _get_app(self):
-        """线程安全地初始化并缓存被挂载的 ASGI 应用。"""
-        if self._app is None:
-            with self._lock:
-                if self._app is None:
-                    self._app = self._loader()
-        return self._app
-
-    async def __call__(self, scope, receive, send):
-        """将 ASGI 请求转发给延迟加载的旧版服务。"""
-        app = self._get_app()
-        await app(scope, receive, send)
-
-
-def _load_import_app():
-    """导入旧版文档导入服务，仅在实际请求时执行。"""
-    from web.api.import_service import app
-    return app
-
-
-def _load_query_app():
-    """导入旧版问答服务，仅在实际请求时执行。"""
-    from web.api.query_service import app
-    return app
 
 
 @asynccontextmanager
@@ -91,8 +55,6 @@ app.include_router(auth_router)
 app.include_router(mysql_router)
 app.include_router(query_router)
 app.include_router(settings_router)
-app.mount(f"{settings.api_v1_prefix}/import", LazyASGIApp(_load_import_app), name="import-api")
-app.mount(f"{settings.api_v1_prefix}/chat", LazyASGIApp(_load_query_app), name="chat-api")
 
 
 @app.get("/", include_in_schema=False)

@@ -1,3 +1,5 @@
+/** 管理端用户、知识库、文档、权限、操作日志和仪表盘接口。 */
+
 import { authenticatedFetch } from './auth'
 import request from '../utils/request'
 import type { DocumentStatus } from '../constants'
@@ -136,6 +138,19 @@ export type SystemSetting = {
   updated_at: string
   updated_by: number | null
 }
+export type DashboardActivity = {
+  operation: string
+  resource_type: string | null
+  resource_display_name: string | null
+  user_display_name: string | null
+  created_at: string
+}
+
+export type DashboardOverview = {
+  session_count: number
+  hit_rate: number
+  activities: DashboardActivity[]
+}
 export type OperationLogPage = {
   items: OperationLog[]
   total: number
@@ -167,6 +182,7 @@ async function requestApi<T>(path: string, options: RequestInit = {}): Promise<T
 
 /** 统一封装管理端用户、权限、知识库和文档接口。 */
 export const mysqlApi = {
+  dashboardOverview: () => requestApi<DashboardOverview>("/api/v1/dashboard/overview"),
   // 用户与访问控制
   listUsers: (params = '') => {
     const query = params ? `?${params}` : ''

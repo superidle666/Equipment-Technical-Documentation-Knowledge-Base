@@ -1,3 +1,5 @@
+/** 用户端页面、会话、消息、知识库和来源数据结构。 */
+
 import type { QuerySource } from '../api/query'
 
 export type UserMessage = {
@@ -5,7 +7,9 @@ export type UserMessage = {
   role: 'user' | 'assistant'
   content: string
   time: string
+  timestamp?: number
   streaming?: boolean
+  imageUrls?: string[]
 }
 
 export type UserConversation = {
@@ -13,6 +17,7 @@ export type UserConversation = {
   libraryId?: number
   title: string
   time: string
+  group?: string
   active?: boolean
 }
 
@@ -30,6 +35,7 @@ export type QueryChatMessage = {
   content: string
   created_at: number
   sources: QuerySource[]
+  image_urls: string[]
 }
 
 export type QuerySessionMessages = {

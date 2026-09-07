@@ -32,5 +32,5 @@ async def database_health() -> dict:
 
 @router.get("/api", summary="API 能力列表")
 async def api_index() -> dict:
-    """列出统一入口下的主要 API 分组及旧服务兼容地址。"""
-    return {"code": 0, "message": "ok", "data": {"name": settings.app_name, "version": settings.app_version, "groups": {"import": f"{settings.api_v1_prefix}/import", "chat": f"{settings.api_v1_prefix}/chat", "mysql": f"{settings.api_v1_prefix}"}, "legacy_services": {"import": "web/api/import_service.py (default port 8000)", "chat": "web/api/query_service.py (default port 8001)"}}}
+    """列出统一入口下的主要 API 分组。"""
+    return {"code": 0, "message": "ok", "data": {"name": settings.app_name, "version": settings.app_version, "groups": {"query": f"{settings.api_v1_prefix}/query", "management": settings.api_v1_prefix}}}

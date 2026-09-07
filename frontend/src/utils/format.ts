@@ -1,4 +1,6 @@
-﻿export function formatFileSize(bytes: number | null | undefined): string {
+/** 前端展示格式化工具。 */
+
+export function formatFileSize(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return '-'
   if (bytes < 1024) return `${Math.round(bytes)} B`
   const units = ['KB', 'MB', 'GB']
